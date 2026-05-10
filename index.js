@@ -23,8 +23,8 @@ const state = {
 async function fetchXERate(from, to) {
     try {
         const url = `https://www.xe.com/currencyconverter/convert/?Amount=1&From=${from}&To=${to}`;
-        const { data } = await axios.get(url, { 
-            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' } 
+        const { data } = await axios.get(url, {
+            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
         });
         const regex = new RegExp(`1 ${from} = ([0-9,.]+) ${to}`, 'i');
         const match = data.match(regex);
@@ -58,7 +58,7 @@ async function fetchFragmentData() {
         // Fragment narxni ko'pincha .tm-stars-buy-total ichida saqlaydi
         const starsTonRaw = $('.tm-stars-buy-total').first().text() || $('button .tm-button-label').text();
         const starsTon = parseFloat(starsTonRaw.replace(/[^\d.]/g, ''));
-        
+
         if (starsTon > 0) {
             state.stars_usd = (starsTon * tonData.price) / 100;
         }
@@ -72,7 +72,7 @@ async function fetchFragmentData() {
             const $p = cheerio.load(premPage.data);
             const premTonRaw = $('.tm-stars-buy-total').first().text() || $('.tm-button-label').text();
             const premTon = parseFloat(premTonRaw.replace(/[^\d.]/g, ''));
-            
+
             if (premTon > 0) {
                 state.premium[m] = premTon * tonData.price;
             }
@@ -89,7 +89,7 @@ async function updateAllRates() {
     const xeRub = await fetchXERate("USD", "RUB");
     if (xeUzs) state.uzs = xeUzs;
     if (xeRub) state.rub = xeRub;
-    
+
     await fetchFragmentData();
     state.last_updated = new Date().toLocaleTimeString('uz-UZ', { hour: '2-digit', minute: '2-digit' });
 }
@@ -133,13 +133,13 @@ bot.start((ctx) => ctx.replyWithMarkdown(`👋 **CoinSnap Botga xush kelibsiz!**
 
 bot.help((ctx) => {
     const h = `📖 **Botdan foydalanish:**\n\n` +
-    `🔸 **Kripto:** \`1 ton\`, \`1 btc uzs\`, \`1000 not\`\n` +
-    `🔸 **Stars:** \`100 stars\`, \`50 stars uzs\`\n` +
-    `🔸 **Premium:** \`3 premium\`, \`6 premium uzs\`, \`12 premium\`\n` +
-    `🔸 **Komissiya:** \`1000 ton com 5\`\n` +
-    `🔸 **Foiz:** \`15000 5%\`\n` +
-    `🔸 **Matematika:** \`44*6\`, \`100/4\`\n\n` +
-    `⚡️ Kurslar XE.com, Bitget va Fragment-dan real-vaqtda olinadi.`;
+        `🔸 **Kripto:** \`1 ton\`, \`1 btc uzs\`, \`1000 not\`\n` +
+        `🔸 **Stars:** \`100 stars\`, \`50 stars uzs\`\n` +
+        `🔸 **Premium:** \`3 premium\`, \`6 premium uzs\`, \`12 premium\`\n` +
+        `🔸 **Komissiya:** \`1000 ton com 5\`\n` +
+        `🔸 **Foiz:** \`15000 5%\`\n` +
+        `🔸 **Matematika:** \`44*6\`, \`100/4\`\n\n` +
+        `⚡️ Kurslar XE.com, Bitget va Fragment-dan real-vaqtda olinadi.`;
     ctx.replyWithMarkdown(h);
 });
 
@@ -173,48 +173,95 @@ bot.on('text', async (ctx) => {
         }
     }
 
-    // C. Foiz (15000 5%)
-    const m_perc = text.match(/^([\d\s\+\-\*\/\(\)\.]+)\s*(\d+(?:\.\d+)?)\s*%$/);
+    // C. Foiz (Masalan: 120 45% yoki 15000+500 10%)
+    const m_perc = text.match(/^([\d\s\+\-\*\/\(\)\.]+)\s+(\d+(?:\.\d+)?)\s*%$/);
     if (m_perc) {
         try {
-            const base = math.evaluate(m_perc[1]);
+            // Birinchi qismni (son yoki amalni) hisoblab olamiz
+            const baseText = m_perc[1].trim();
+            const base = math.evaluate(baseText);
             const prc = parseFloat(m_perc[2]);
-            const res = (base * prc) / 100;
-            return ctx.replyWithMarkdown(`📊 **${prc}% Hisobi**\n\n🎯 Natija: \`${fmt(res)}\`\n➕ Jami: \`${fmt(base+res)}\`\n➖ Ayirma: \`${fmt(base-res)}\``,
-                Markup.inlineKeyboard([[Markup.button.callback("🗑 O'chirish", `del_${ctx.from.id}`)]]));
-        } catch (e) {}
+
+            // Foizni hisoblash (yaxlitlamasdan, boricha)
+            const res = math.divide(math.multiply(base, prc), 100);
+
+            const resText = `📊 **${prc}% Hisobi**\n\n` +
+                `🔢 Asos: \`${fmt(base)}\`\n` +
+                `🎯 Natija (${prc}%): \`${fmt(res)}\`\n` +
+                `➕ Jami (+): \`${fmt(math.add(base, res))}\`\n` +
+                `➖ Ayirma (-): \`${fmt(math.subtract(base, res))}\``;
+
+            return ctx.replyWithMarkdown(resText,
+                Markup.inlineKeyboard([[Markup.button.callback("🗑 O'chirish", `del_${ctx.from.id}`)]])
+            );
+        } catch (e) {
+            console.error("Foiz hisoblashda xato:", e);
+        }
     }
 
-    // D. Matematika
+    // D & E. Matematika + Konvertatsiya (Birlashtirilgan)
+    // 10+10 ton, 5 ton uzs, 5 ton to uzs kabi so'rovlarni hammasini tutadi
+    const m_pair = text.match(/^([\d\s\+\-\*\/\(\)\.]+)\s+([a-z][a-z0-9]*)(?:\s+(?:to\s+)?([a-z][a-z0-9]*))?$/);
+
+    if (m_pair) {
+        try {
+            const expression = m_pair[1].trim();
+            const fSym = m_pair[2].toUpperCase();
+            const tSym = (m_pair[3] || "USD").toUpperCase();
+
+            // Matematik amal bormi yoki shunchaki sonmi?
+            let amt;
+            if (/[\+\-\*\/]/.test(expression)) {
+                amt = math.evaluate(expression);
+            } else {
+                amt = parseFloat(expression);
+            }
+
+            if (isNaN(amt)) return; // Agar son bo'lmasa to'xtatish
+
+            const fVal = await getVal(fSym);
+            const tVal = await getVal(tSym);
+            const crypto = await getPrice(fSym);
+
+            if (fVal && tVal) {
+                const usd = math.multiply(amt, fVal);
+                const res = math.divide(usd, tVal);
+
+                let info = crypto ? `\n${crypto.change >= 0 ? '🟢' : '🔴'} 24s: \`${crypto.change >= 0 ? '+' : ''}${crypto.change.toFixed(2)}%\`` : "";
+
+                // Sarlavha: Agar matematik amal bo'lsa natijani, son bo'lsa o'zini ko'rsatamiz
+                const header = /[\+\-\*\/]/.test(expression)
+                    ? `🔢 **${expression} = ${fmt(amt, fSym)} ${fSym}**`
+                    : `🔄 **${fmt(amt, fSym)} ${fSym}**`;
+
+                const resText = `${header}\n🪙 \`${fmt(res, tSym)} ${tSym}\`${info}\n\n${await getExtras(usd, tSym)}`;
+
+                return ctx.replyWithMarkdown(resText, Markup.inlineKeyboard([[Markup.button.callback("🗑 O'chirish", `del_${ctx.from.id}`)]]));
+            }
+        } catch (e) {
+            console.error("Hisoblashda xato:", e);
+        }
+    }
+
+    // F. Oddiy Matematika (Valyutasiz: 44*6)
     if (/^[0-9\+\-\*\/\(\)\.\s]+$/.test(text) && /[\+\-\*\/]/.test(text)) {
         try {
             const calc = math.evaluate(text);
             return ctx.replyWithMarkdown(`🔢 \`${text} = ${calc.toLocaleString()}\``, Markup.inlineKeyboard([[Markup.button.callback("🗑 O'chirish", `del_${ctx.from.id}`)]]));
-        } catch (e) {}
+        } catch (e) { }
     }
 
-    // E. Konvertatsiya
-    const m_pair = text.match(/^(\d+(?:\.\d+)?)\s+([a-z][a-z0-9]*)(?:\s+([a-z][a-z0-9]*))?$/);
-    if (m_pair) {
-        const amt = parseFloat(m_pair[1]);
-        const fSym = m_pair[2].toUpperCase();
-        const tSym = (m_pair[3] || "USD").toUpperCase();
-        const fVal = await getVal(fSym);
-        const tVal = await getVal(tSym);
-        const crypto = await getPrice(fSym);
-
-        if (fVal && tVal) {
-            const usd = amt * fVal;
-            const res = usd / tVal;
-            let info = crypto ? `\n${crypto.change >= 0 ? '🟢' : '🔴'} 24s: \`${crypto.change >= 0 ? '+' : ''}${crypto.change.toFixed(2)}%\`` : "";
-            const resText = `🔄 **${fmt(amt, fSym)} ${fSym}**\n🪙 \`${fmt(res, tSym)} ${tSym}\`${info}\n\n${await getExtras(usd, tSym)}`;
-            return ctx.replyWithMarkdown(resText, Markup.inlineKeyboard([[Markup.button.callback("🗑 O'chirish", `del_${ctx.from.id}`)]]));
-        }
+    // Oddiy Matematika (Valyutasiz bo'lsa)
+    if (/^[0-9\+\-\*\/\(\)\.\s]+$/.test(text) && /[\+\-\*\/]/.test(text)) {
+        try {
+            const calc = math.evaluate(text);
+            return ctx.replyWithMarkdown(`🔢 \`${text} = ${calc.toLocaleString()}\``, Markup.inlineKeyboard([[Markup.button.callback("🗑 O'chirish", `del_${ctx.from.id}`)]]));
+        } catch (e) { }
     }
 });
 
 bot.action(/del_(\d+)/, (ctx) => {
-    if (ctx.from.id.toString() === ctx.match[1]) ctx.deleteMessage().catch(() => {});
+    if (ctx.from.id.toString() === ctx.match[1]) ctx.deleteMessage().catch(() => { });
 });
 
 const app = express();
