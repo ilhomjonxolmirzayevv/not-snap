@@ -1,12 +1,12 @@
 import { Telegraf, Markup } from 'telegraf';
 import axios from 'axios';
 import * as math from 'mathjs';
+import * as cheerio from 'cheerio';
 import dotenv from 'dotenv';
 import express from 'express';
 
 dotenv.config();
 
-// --- Konfiguratsiya ---
 const API_TOKEN = process.env.API_TOKEN || "";
 const PORT = process.env.PORT || 5000;
 const bot = new Telegraf(API_TOKEN);
@@ -14,113 +14,95 @@ const bot = new Telegraf(API_TOKEN);
 const state = {
     uzs: 12850.0,
     rub: 92.5,
+    stars_usd: 0.015, // 1 Star ~ $0.015
+    premium: { 3: 12.0, 6: 16.0, 12: 29.0 }, // O'rtacha USD narxlar (zaxira)
     last_updated: null
 };
 
-// --- XE.com dan kursni olish (Eng aniq manba) ---
+// --- 1. XE.COM FIAT ---
 async function fetchXERate(from, to) {
     try {
         const url = `https://www.xe.com/currencyconverter/convert/?Amount=1&From=${from}&To=${to}`;
-        const { data } = await axios.get(url, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            }
+        const { data } = await axios.get(url, { 
+            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' } 
         });
-
-        // Kursni sahifa ichidan qidirib topish
         const regex = new RegExp(`1 ${from} = ([0-9,.]+) ${to}`, 'i');
         const match = data.match(regex);
+        return match ? parseFloat(match[1].replace(/,/g, '')) : null;
+    } catch (e) { return null; }
+}
+
+// --- 2. BITGET KRIPTO (TON narxi juda muhim) ---
+async function getPrice(symbol) {
+    const sym = symbol.toUpperCase();
+    try {
+        const res = await axios.get(`https://api.bitget.com/api/v2/spot/market/tickers?symbol=${sym}USDT`);
+        if (res.data.code === '00000' && res.data.data?.[0]) {
+            const t = res.data.data[0];
+            return { price: parseFloat(t.lastPr), change: parseFloat(t.change24h) * 100 };
+        }
+    } catch (e) { return null; }
+}
+
+// --- 3. FRAGMENT SCRAPER (Stars & Premium) ---
+async function fetchFragmentData() {
+    try {
+        const tonData = await getPrice('TON');
+        if (!tonData) return;
+
+        // STARS NARXI
+        const starsPage = await axios.get('https://fragment.com/stars/buy?quantity=100', {
+            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+        });
+        const $s = cheerio.load(starsPage.data);
+        // Fragment narxni ko'pincha .tm-stars-buy-total ichida saqlaydi
+        const starsTonRaw = $('.tm-stars-buy-total').first().text() || $('button .tm-button-label').text();
+        const starsTon = parseFloat(starsTonRaw.replace(/[^\d.]/g, ''));
         
-        if (match && match[1]) {
-            return parseFloat(match[1].replace(/,/g, ''));
+        if (starsTon > 0) {
+            state.stars_usd = (starsTon * tonData.price) / 100;
         }
 
-        // Zaxira usul: JSON strukturasidan qidirish
-        const secondMatch = data.match(new RegExp(`${to}":([\d.]+)`, 'i'));
-        if (secondMatch && secondMatch[1]) {
-            return parseFloat(secondMatch[1]);
+        // PREMIUM NARXLARI (3, 6, 12 oy)
+        const months = [3, 6, 12];
+        for (const m of months) {
+            const premPage = await axios.get(`https://fragment.com/premium/gift?months=${m}`, {
+                headers: { 'User-Agent': 'Mozilla/5.0' }
+            });
+            const $p = cheerio.load(premPage.data);
+            const premTonRaw = $('.tm-stars-buy-total').first().text() || $('.tm-button-label').text();
+            const premTon = parseFloat(premTonRaw.replace(/[^\d.]/g, ''));
+            
+            if (premTon > 0) {
+                state.premium[m] = premTon * tonData.price;
+            }
         }
-
-        return null;
+        console.log(`Fragment ma'lumotlari yangilandi. TON: $${tonData.price}`);
     } catch (e) {
-        console.error(`XE.com [${from}/${to}] xatosi:`, e.message);
-        return null;
+        console.error("Fragment'dan ma'lumot olishda xato:", e.message);
     }
 }
 
-// Kurslarni har 5 daqiqada yangilab turish
-async function updateFiatRates() {
-    console.log("Kurslar XE.com dan yangilanmoqda...");
+async function updateAllRates() {
+    console.log("Kurslar yangilanmoqda...");
     const xeUzs = await fetchXERate("USD", "UZS");
     const xeRub = await fetchXERate("USD", "RUB");
-
     if (xeUzs) state.uzs = xeUzs;
     if (xeRub) state.rub = xeRub;
-
+    
+    await fetchFragmentData();
     state.last_updated = new Date().toLocaleTimeString('uz-UZ', { hour: '2-digit', minute: '2-digit' });
-    console.log(`Yangilandi: 1$ = ${state.uzs} UZS, 1$ = ${state.rub} RUB (${state.last_updated})`);
 }
 
-setInterval(updateFiatRates, 300000); 
-updateFiatRates();
+setInterval(updateAllRates, 600000); // 10 daqiqada yangilanadi
+updateAllRates();
 
-// --- Bitget Birjasidan Kripto Narxlarni Olish ---
-async function getBitgetPrice(symbol) {
-    const url = `https://api.bitget.com/api/v2/spot/market/tickers?symbol=${symbol.toUpperCase()}USDT`;
-    try {
-        const resp = await axios.get(url);
-        if (resp.data.code === '00000' && resp.data.data?.[0]) {
-            const ticker = resp.data.data[0];
-            return {
-                price: parseFloat(ticker.lastPr),
-                change: parseFloat(ticker.change24h) * 100
-            };
-        }
-    } catch (e) {
-        console.warn(`Bitget error [${symbol}]:`, e.message);
-    }
-    return null;
-}
-
-// --- Sonlarni Formatlash ---
-function fmt(value, symbol = "") {
-    const s = symbol.toUpperCase();
-    if (s === "UZS" || s === "RUB") {
-        return value.toLocaleString('en-US', { maximumFractionDigits: 0 });
-    } else if (s === "USD") {
-        return value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    } else {
-        let formatted = value.toFixed(8).replace(/\.?0+$/, "");
-        if (formatted.includes(".")) {
-            const [intPart, decPart] = formatted.split(".");
-            return `${parseInt(intPart).toLocaleString()}.${decPart}`;
-        }
-        return parseInt(formatted).toLocaleString();
-    }
-}
-
-function fmtResult(value) {
-    if (value === Math.floor(value) && Math.abs(value) < 1e15) {
-        return value.toLocaleString();
-    }
-    return fmt(value);
-}
-
-// --- Qo'shimcha valyutalar ro'yxatini shakllantirish ---
-async function getExtras(usdVal, exclude = "") {
-    const exc = exclude.toUpperCase();
-    const tonData = await getBitgetPrice('TON');
-    const btcData = await getBitgetPrice('BTC');
-    const tonP = tonData?.price || 1;
-    const btcP = btcData?.price || 1;
-
-    const lines = [];
-    if (exc !== "UZS") lines.push(`🇺🇿 \`${fmt(usdVal * state.uzs, 'UZS')} UZS\``);
-    if (exc !== "USD") lines.push(`🇺🇸 \`$${fmt(usdVal, 'USD')} USD\``);
-    if (exc !== "RUB") lines.push(`🇷🇺 \`${fmt(usdVal * state.rub, 'RUB')} RUB\``);
-    if (exc !== "TON") lines.push(`💎 \`${fmt(usdVal / tonP, 'TON')} TON\``);
-    if (exc !== "BTC") lines.push(`₿ \`${fmt(usdVal / btcP, 'BTC')} BTC\``);
-    return lines.join("\n");
+// --- 4. FORMATLASH VA HISOB-KITOB ---
+function fmt(val, sym = "") {
+    const s = sym.toUpperCase();
+    if (s === "UZS" || s === "RUB") return val.toLocaleString('en-US', { maximumFractionDigits: 0 });
+    if (s === "USD") return val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    return val.toFixed(8).replace(/\.?0+$/, "");
 }
 
 async function getVal(s) {
@@ -128,130 +110,114 @@ async function getVal(s) {
     if (sym === "USD") return 1.0;
     if (sym === "UZS") return 1 / state.uzs;
     if (sym === "RUB") return 1 / state.rub;
-    const d = await getBitgetPrice(sym);
+    if (sym === "STARS") return state.stars_usd;
+    const d = await getPrice(sym);
     return d ? d.price : null;
 }
 
-// --- Tugmalar (Ustun shaklida) ---
-function getReplyButtons(userId, symbol = null) {
-    const buttons = [];
-    if (symbol && !["UZS", "RUB", "USD"].includes(symbol.toUpperCase())) {
-        buttons.push([Markup.button.url(`📈 ${symbol.toUpperCase()}/USDT (Bitget)`, `https://www.bitget.com/spot/${symbol.toUpperCase()}USDT`)]);
-    }
-    buttons.push([Markup.button.url("📊 XE.com Jonli Kurslar", `https://www.xe.com/currencyconverter/convert/?Amount=1&From=USD&To=UZS`)]);
-    buttons.push([Markup.button.callback("🗑 O'chirish", `del_${userId}`)]);
-    return Markup.inlineKeyboard(buttons);
+async function getExtras(usdVal, exclude = "") {
+    const exc = exclude.toUpperCase();
+    const tonD = await getPrice('TON');
+    const lines = [];
+    if (exc !== "UZS") lines.push(`🇺🇿 \`${fmt(usdVal * state.uzs, 'UZS')} UZS\``);
+    if (exc !== "USD") lines.push(`🇺🇸 \`$${fmt(usdVal, 'USD')}\``);
+    if (exc !== "RUB") lines.push(`🇷🇺 \`${fmt(usdVal * state.rub, 'RUB')} RUB\``);
+    if (exc !== "STARS") lines.push(`⭐ \`${fmt(usdVal / state.stars_usd, 'STARS')} Stars\``);
+    if (tonD) lines.push(`💎 \`${(usdVal / tonD.price).toFixed(3)} TON\``);
+    return lines.join("\n");
 }
 
-// --- Bot Handlerlari ---
+// --- 5. BOT HANDLERLARI ---
 
-bot.start((ctx) => ctx.replyWithMarkdown(`👋 **CoinSnap botiga xush kelibsiz!**\n\nXE.com va Bitget kurslari asosida ishlayman.`));
+bot.start((ctx) => ctx.replyWithMarkdown(`👋 **CoinSnap Botga xush kelibsiz!**\n\nBuyruqlar qo'llanmasi: /help`));
 
-bot.command('coins', async (ctx) => {
-    const listCoins = ["BTC", "ETH", "TON", "SOL", "NOT"];
-    let resText = "📊 **Jonli Narxlar:**\n\n";
-    for (const c of listCoins) {
-        const data = await getBitgetPrice(c);
-        if (data) {
-            const arrow = data.change >= 0 ? "🟢" : "🔴";
-            resText += `${arrow} **${c}**: \`$${fmt(data.price, 'USD')}\` (${data.change >= 0 ? '+' : ''}${data.change.toFixed(2)}%)\n`;
-        }
-    }
-    await ctx.replyWithMarkdown(resText, getReplyButtons(ctx.from.id));
+bot.help((ctx) => {
+    const h = `📖 **Botdan foydalanish:**\n\n` +
+    `🔸 **Kripto:** \`1 ton\`, \`1 btc uzs\`, \`1000 not\`\n` +
+    `🔸 **Stars:** \`100 stars\`, \`50 stars uzs\`\n` +
+    `🔸 **Premium:** \`3 premium\`, \`6 premium uzs\`, \`12 premium\`\n` +
+    `🔸 **Komissiya:** \`1000 ton com 5\`\n` +
+    `🔸 **Foiz:** \`15000 5%\`\n` +
+    `🔸 **Matematika:** \`44*6\`, \`100/4\`\n\n` +
+    `⚡️ Kurslar XE.com, Bitget va Fragment-dan real-vaqtda olinadi.`;
+    ctx.replyWithMarkdown(h);
 });
 
 bot.on('text', async (ctx) => {
     const text = ctx.message.text.toLowerCase().replace(/,/g, '.').trim();
-    if (text === 'coins') return bot.handleUpdate({ ...ctx.update, message: { ...ctx.message, text: '/coins' } });
 
-    const num_p = "(\\d+(?:\\.\\d+)?)";
-    const sym_p = "([a-z][a-z0-9]*)";
-    const re_com = new RegExp(`^${num_p}\\s+${sym_p}\\s+com\\s+${num_p}$`);
-    const re_uzs = new RegExp(`^${num_p}\\s+uzs\\s+${sym_p}$`);
-    const re_pair = new RegExp(`^${num_p}\\s+${sym_p}\\s+${sym_p}$`);
-    const re_single = new RegExp(`^${num_p}\\s+${sym_p}$`);
-    const math_pattern = /^([\d\s\+\-\*\/\(\)\.]+)\s+([a-z][a-z0-9]*)$/;
-    const has_op = /[\+\-\*\/]/;
+    // A. Premium (masalan: 3 premium uzs)
+    const m_prem = text.match(/^(\d+)\s+premium(?:\s+([a-z]+))?$/);
+    if (m_prem) {
+        const m = parseInt(m_prem[1]);
+        const tSym = (m_prem[2] || "USD").toUpperCase();
+        if (state.premium[m]) {
+            const usdVal = state.premium[m];
+            const tVal = await getVal(tSym);
+            const resText = `🌟 **Telegram Premium (${m} oy)**\n\n💰 Narxi: \`${fmt(usdVal / tVal, tSym)} ${tSym}\`\n\n${await getExtras(usdVal, tSym)}`;
+            return ctx.replyWithMarkdown(resText, Markup.inlineKeyboard([[Markup.button.callback("🗑 O'chirish", `del_${ctx.from.id}`)]]));
+        }
+    }
 
-    let resText = "";
-    let currentSymbol = null;
+    // B. Komissiya (1000 ton com 5)
+    const m_com = text.match(/^(\d+(?:\.\d+)?)\s+([a-z0-9]+)\s+com\s+(\d+(?:\.\d+)?)$/);
+    if (m_com) {
+        const amt = parseFloat(m_com[1]);
+        const sym = m_com[2].toUpperCase();
+        const prc = parseFloat(m_com[3]);
+        const res = amt - (amt * prc / 100);
+        const rate = await getVal(sym);
+        if (rate) {
+            const resText = `⚖️ **Komissiya: ${prc}%**\n\n✅ Qoladi: \`${fmt(res, sym)} ${sym}\`\n\n${await getExtras(res * rate, sym)}`;
+            return ctx.replyWithMarkdown(resText, Markup.inlineKeyboard([[Markup.button.callback("🗑 O'chirish", `del_${ctx.from.id}`)]]));
+        }
+    }
 
-    // 1. Matematik Amallar (masalan: 100+50 ton)
-    const m_math_sym = text.match(math_pattern);
-    if (m_math_sym && has_op.test(m_math_sym[1])) {
+    // C. Foiz (15000 5%)
+    const m_perc = text.match(/^([\d\s\+\-\*\/\(\)\.]+)\s*(\d+(?:\.\d+)?)\s*%$/);
+    if (m_perc) {
         try {
-            const calc = math.evaluate(m_math_sym[1]);
-            const symbol = m_math_sym[2].toUpperCase();
-            const val = await getVal(symbol);
-            if (val !== null) {
-                const totalUsd = calc * val;
-                const extras = await getExtras(totalUsd, symbol);
-                resText = `🔢 \`${m_math_sym[1].trim()} = ${fmtResult(calc)} ${symbol}\`\n\n🪙 **${fmtResult(calc)} ${symbol}**\n\n${extras}`;
-                currentSymbol = symbol;
-            }
-        } catch (e) { return; }
+            const base = math.evaluate(m_perc[1]);
+            const prc = parseFloat(m_perc[2]);
+            const res = (base * prc) / 100;
+            return ctx.replyWithMarkdown(`📊 **${prc}% Hisobi**\n\n🎯 Natija: \`${fmt(res)}\`\n➕ Jami: \`${fmt(base+res)}\`\n➖ Ayirma: \`${fmt(base-res)}\``,
+                Markup.inlineKeyboard([[Markup.button.callback("🗑 O'chirish", `del_${ctx.from.id}`)]]));
+        } catch (e) {}
     }
 
-    // 2. Komissiya (masalan: 1000 ton com 5)
-    const m_com = text.match(re_com);
-    if (m_com && !resText) {
-        const amount = parseFloat(m_com[1]);
-        const symbol = m_com[2].toUpperCase();
-        const perc = parseFloat(m_com[3]);
-        const result = amount - (amount * perc / 100);
-        const rate = await getVal(symbol);
-        const totalUsd = result * (rate || 0);
-        const extras = await getExtras(totalUsd, symbol);
-        resText = `⚖️ **Komissiya: ${perc}%**\n\n✅ **Qoladi: \`${fmt(result, symbol)} ${symbol}\`**\n\n${extras}`;
-        currentSymbol = symbol;
+    // D. Matematika
+    if (/^[0-9\+\-\*\/\(\)\.\s]+$/.test(text) && /[\+\-\*\/]/.test(text)) {
+        try {
+            const calc = math.evaluate(text);
+            return ctx.replyWithMarkdown(`🔢 \`${text} = ${calc.toLocaleString()}\``, Markup.inlineKeyboard([[Markup.button.callback("🗑 O'chirish", `del_${ctx.from.id}`)]]));
+        } catch (e) {}
     }
 
-    // 3. UZS dan Kriptoga (masalan: 1000000 uzs ton)
-    const m_uzs = text.match(re_uzs);
-    if (m_uzs && !resText) {
-        const uzsAmount = parseFloat(m_uzs[1]);
-        const symbol = m_uzs[2].toUpperCase();
-        const price = await getVal(symbol);
-        if (price) {
-            const amountUsd = uzsAmount / state.uzs;
-            const extras = await getExtras(amountUsd, symbol);
-            resText = `💰 **${fmt(uzsAmount, 'UZS')} UZS** ➡️ **${symbol}**\n\n🪙 \`${fmt(amountUsd / price, symbol)} ${symbol}\`\n\n${extras}`;
-            currentSymbol = symbol;
-        }
-    }
-
-    // 4. Juftliklar yoki Yagona (masalan: 1 btc uzs yoki 1 btc)
-    const m_pair = text.match(re_pair) || text.match(re_single);
-    if (m_pair && !resText) {
-        const amount = parseFloat(m_pair[1]);
+    // E. Konvertatsiya
+    const m_pair = text.match(/^(\d+(?:\.\d+)?)\s+([a-z][a-z0-9]*)(?:\s+([a-z][a-z0-9]*))?$/);
+    if (m_pair) {
+        const amt = parseFloat(m_pair[1]);
         const fSym = m_pair[2].toUpperCase();
-        const tSym = m_pair[3]?.toUpperCase() || "USD";
-        const vFrom = await getVal(fSym);
-        const vTo = await getVal(tSym);
-        if (vFrom && vTo) {
-            const totalUsd = amount * vFrom;
-            const final = totalUsd / vTo;
-            const extras = await getExtras(totalUsd, tSym === "USD" ? fSym : tSym);
-            resText = tSym === "USD" 
-                ? `🪙 **${fmt(amount, fSym)} ${fSym}**\n\n${extras}`
-                : `🔄 **${fmt(amount, fSym)} ${fSym}** ➡️ **${tSym}**\n\n🪙 \`${fmt(final, tSym)} ${tSym}\`\n\n${extras}`;
-            currentSymbol = tSym === "USD" ? fSym : tSym;
+        const tSym = (m_pair[3] || "USD").toUpperCase();
+        const fVal = await getVal(fSym);
+        const tVal = await getVal(tSym);
+        const crypto = await getPrice(fSym);
+
+        if (fVal && tVal) {
+            const usd = amt * fVal;
+            const res = usd / tVal;
+            let info = crypto ? `\n${crypto.change >= 0 ? '🟢' : '🔴'} 24s: \`${crypto.change >= 0 ? '+' : ''}${crypto.change.toFixed(2)}%\`` : "";
+            const resText = `🔄 **${fmt(amt, fSym)} ${fSym}**\n🪙 \`${fmt(res, tSym)} ${tSym}\`${info}\n\n${await getExtras(usd, tSym)}`;
+            return ctx.replyWithMarkdown(resText, Markup.inlineKeyboard([[Markup.button.callback("🗑 O'chirish", `del_${ctx.from.id}`)]]));
         }
     }
-
-    if (resText) {
-        await ctx.replyWithMarkdown(resText, getReplyButtons(ctx.from.id, currentSymbol));
-    }
 });
 
-bot.action(/del_(\d+)/, async (ctx) => {
-    if (ctx.from.id.toString() === ctx.match[1]) await ctx.deleteMessage().catch(() => {});
-    else await ctx.answerCbQuery("Faqat egasi o'chira oladi!");
+bot.action(/del_(\d+)/, (ctx) => {
+    if (ctx.from.id.toString() === ctx.match[1]) ctx.deleteMessage().catch(() => {});
 });
 
-// Render uchun Server
 const app = express();
-app.get('/', (req, res) => res.send('CoinSnap Bot is Running! Source: XE.com'));
-app.listen(PORT, () => console.log(`Server: ${PORT}`));
-
+app.get('/', (req, res) => res.send('Not Snap is Live!'));
+app.listen(PORT);
 bot.launch();
