@@ -255,7 +255,7 @@ bot.on('text', async (ctx) => {
     if (/^[0-9\+\-\*\/\(\)\.\s]+$/.test(text) && /[\+\-\*\/]/.test(text)) {
         try {
             const calc = math.evaluate(text);
-            return ctx.replyWithMarkdown(`🔢 \`${text} = ${calc.toLocaleString()}\``, Markup.inlineKeyboard([[Markup.button.callback("🗑 O'chirish", `del_${ctx.from.id}`)]]));
+            return ctx.replyWithMarkdown(`\`${text} = ${calc.toLocaleString()}\``, Markup.inlineKeyboard([[Markup.button.callback("🗑 O'chirish", `del_${ctx.from.id}`)]]));
         } catch (e) { }
     }
 });
