@@ -199,8 +199,7 @@ bot.on('text', async (ctx) => {
         }
     }
 
-    // D & E. Matematika + Konvertatsiya (Birlashtirilgan)
-    // 10+10 ton, 5 ton uzs, 5 ton to uzs kabi so'rovlarni hammasini tutadi
+    // D & E. Matematika + Konvertatsiya (Barcha amallar uchun: +, -, *, /)
     const m_pair = text.match(/^([\d\s\+\-\*\/\(\)\.]+)\s+([a-z][a-z0-9]*)(?:\s+(?:to\s+)?([a-z][a-z0-9]*))?$/);
 
     if (m_pair) {
@@ -209,29 +208,33 @@ bot.on('text', async (ctx) => {
             const fSym = m_pair[2].toUpperCase();
             const tSym = (m_pair[3] || "USD").toUpperCase();
 
-            // Matematik amal bormi yoki shunchaki sonmi?
+            // Matematik amal bormi? (Endi barcha belgilar tekshiriladi)
             let amt;
             if (/[\+\-\*\/]/.test(expression)) {
+                // math.evaluate har qanday murakkablikdagi (58*2 yoki 21310/485) amalni yechadi
                 amt = math.evaluate(expression);
             } else {
                 amt = parseFloat(expression);
             }
 
-            if (isNaN(amt)) return; // Agar son bo'lmasa to'xtatish
+            // IsNaN tekshiruvi va xavfsizlik
+            if (amt === null || amt === undefined || isNaN(amt)) return;
 
             const fVal = await getVal(fSym);
             const tVal = await getVal(tSym);
             const crypto = await getPrice(fSym);
 
             if (fVal && tVal) {
+                // Aniq hisoblash (yaxlitlamasdan)
                 const usd = math.multiply(amt, fVal);
                 const res = math.divide(usd, tVal);
 
                 let info = crypto ? `\n${crypto.change >= 0 ? '🟢' : '🔴'} 24s: \`${crypto.change >= 0 ? '+' : ''}${crypto.change.toFixed(2)}%\`` : "";
 
-                // Sarlavha: Agar matematik amal bo'lsa natijani, son bo'lsa o'zini ko'rsatamiz
-                const header = /[\+\-\*\/]/.test(expression)
-                    ? `🔢 **${expression} = ${fmt(amt, fSym)} ${fSym}**`
+                // Sarlavha mantiqi - ifodani kod bloki ichiga olamiz (backtick ` ` bilan)
+                const isMath = /[\+\-\*\/]/.test(expression);
+                const header = isMath
+                    ? `🔢 \`${expression}\` **= ${fmt(amt, fSym)} ${fSym}**`
                     : `🔄 **${fmt(amt, fSym)} ${fSym}**`;
 
                 const resText = `${header}\n🪙 \`${fmt(res, tSym)} ${tSym}\`${info}\n\n${await getExtras(usd, tSym)}`;
@@ -239,16 +242,9 @@ bot.on('text', async (ctx) => {
                 return ctx.replyWithMarkdown(resText, Markup.inlineKeyboard([[Markup.button.callback("🗑 O'chirish", `del_${ctx.from.id}`)]]));
             }
         } catch (e) {
-            console.error("Hisoblashda xato:", e);
+            // Agar matematik xato bo'lsa (masalan 0 ga bo'lish), bot jim qoladi yoki log yozadi
+            console.error("Hisoblash xatosi:", e.message);
         }
-    }
-
-    // F. Oddiy Matematika (Valyutasiz: 44*6)
-    if (/^[0-9\+\-\*\/\(\)\.\s]+$/.test(text) && /[\+\-\*\/]/.test(text)) {
-        try {
-            const calc = math.evaluate(text);
-            return ctx.replyWithMarkdown(`🔢 \`${text} = ${calc.toLocaleString()}\``, Markup.inlineKeyboard([[Markup.button.callback("🗑 O'chirish", `del_${ctx.from.id}`)]]));
-        } catch (e) { }
     }
 
     // Oddiy Matematika (Valyutasiz bo'lsa)
