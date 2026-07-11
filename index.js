@@ -32,9 +32,10 @@ async function fetchXERate(from, to) {
     } catch (e) { return null; }
 }
 
-// --- 2. BITGET KRIPTO (TON narxi juda muhim) ---
+// --- 2. BITGET KRIPTO ---
 async function getPrice(symbol) {
     const sym = symbol.toUpperCase();
+    if (sym === "USDT") return { price: 1.0, change: 0.0 }; 
     try {
         const res = await axios.get(`https://api.bitget.com/api/v2/spot/market/tickers?symbol=${sym}USDT`);
         if (res.data.code === '00000' && res.data.data?.[0]) {
@@ -44,7 +45,7 @@ async function getPrice(symbol) {
     } catch (e) { return null; }
 }
 
-// --- 3. FRAGMENT SCRAPER (Stars & Premium) ---
+// --- 3. FRAGMENT SCRAPER ---
 async function fetchFragmentData() {
     try {
         const tonData = await getPrice('TON');
@@ -55,8 +56,7 @@ async function fetchFragmentData() {
             headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
         });
         const $s = cheerio.load(starsPage.data);
-        // Fragment narxni ko'pincha .tm-stars-buy-total ichida saqlaydi
-        const starsTonRaw = $('.tm-stars-buy-total').first().text() || $('button .tm-button-label').text();
+        const starsTonRaw = $s('.tm-stars-buy-total').first().text() || $s('button .tm-button-label').text();
         const starsTon = parseFloat(starsTonRaw.replace(/[^\d.]/g, ''));
 
         if (starsTon > 0) {
@@ -70,7 +70,7 @@ async function fetchFragmentData() {
                 headers: { 'User-Agent': 'Mozilla/5.0' }
             });
             const $p = cheerio.load(premPage.data);
-            const premTonRaw = $('.tm-stars-buy-total').first().text() || $('.tm-button-label').text();
+            const premTonRaw = $p('.tm-stars-buy-total').first().text() || $p('.tm-button-label').text();
             const premTon = parseFloat(premTonRaw.replace(/[^\d.]/g, ''));
 
             if (premTon > 0) {
@@ -101,13 +101,13 @@ updateAllRates();
 function fmt(val, sym = "") {
     const s = sym.toUpperCase();
     if (s === "UZS" || s === "RUB") return val.toLocaleString('en-US', { maximumFractionDigits: 0 });
-    if (s === "USD") return val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    if (s === "USDT") return val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     return val.toFixed(8).replace(/\.?0+$/, "");
 }
 
 async function getVal(s) {
     const sym = s.toUpperCase();
-    if (sym === "USD") return 1.0;
+    if (sym === "USDT") return 1.0; 
     if (sym === "UZS") return 1 / state.uzs;
     if (sym === "RUB") return 1 / state.rub;
     if (sym === "STARS") return state.stars_usd;
@@ -118,48 +118,92 @@ async function getVal(s) {
 async function getExtras(usdVal, exclude = "") {
     const exc = exclude.toUpperCase();
     const tonD = await getPrice('TON');
+    const gramD = await getPrice('GRAM');
     const lines = [];
     if (exc !== "UZS") lines.push(`🇺🇿 \`${fmt(usdVal * state.uzs, 'UZS')} UZS\``);
-    if (exc !== "USD") lines.push(`🇺🇸 \`$${fmt(usdVal, 'USD')}\``);
+    if (exc !== "USDT") lines.push(`🇺🇸 \`$${fmt(usdVal, 'USDT')} USDT\``);
     if (exc !== "RUB") lines.push(`🇷🇺 \`${fmt(usdVal * state.rub, 'RUB')} RUB\``);
     if (exc !== "STARS") lines.push(`⭐ \`${fmt(usdVal / state.stars_usd, 'STARS')} Stars\``);
-    if (tonD) lines.push(`💎 \`${(usdVal / tonD.price).toFixed(3)} TON\``);
+    if (tonD && exc !== "TON") lines.push(`💎 \`${(usdVal / tonD.price).toFixed(3)} TON\``);
+    if (gramD && exc !== "GRAM") lines.push(`💎 \`${(usdVal / gramD.price).toFixed(3)} GRAM\``);
     return lines.join("\n");
 }
 
-// --- 5. BOT HANDLERLARI ---
+// === [QO'SHILDI]: OFFLINE PAYTDA YOZILGAN ESKI XABARLARNI INDAMAY SKIP QILISH TIZIMI ===
+bot.use(async (ctx, next) => {
+    const now = Math.floor(Date.now() / 1000); // Hozirgi vaqt (saniyalarda)
+    
+    // Agar foydalanuvchidan oddiy xabar kelsa
+    if (ctx.message) {
+        const msgDate = ctx.message.date;
+        // Agar xabar yozilganiga 5 soniyadan ko'p bo'lgan bo'lsa (ya'ni bot o'chgan paytda yozilgan bo'lsa)
+        if (now - msgDate > 5) {
+            return; // Shunchaki skip - bot indamay to'xtaydi va javob yozmaydi
+        }
+    }
+    
+    // Agar inline tugma bosilgan bo'lsa
+    if (ctx.callbackQuery && ctx.callbackQuery.message) {
+        const cbDate = ctx.callbackQuery.message.date;
+        if (now - cbDate > 10) { 
+            return; // Eski tugmalarni ham indamay tashlab ketadi
+        }
+    }
 
+    await next(); // Agar xabar yangi (live) holatda kelgan bo'lsa, kod ishlashda davom etadi
+});
+// ==================================================================================
+
+// --- 5. BOT HANDLERLARI ---
 bot.start((ctx) => ctx.replyWithMarkdown(`👋 **CoinSnap Botga xush kelibsiz!**\n\nBuyruqlar qo'llanmasi: /help`));
 
 bot.help((ctx) => {
     const h = `📖 **Botdan foydalanish:**\n\n` +
-        `🔸 **Kripto:** \`1 ton\`, \`1 btc uzs\`, \`1000 not\`\n` +
+        `🔸 **Kripto:** \`1 gram\`, \`1 ton uzs\`, \`1000 not usdt\`\n` +
         `🔸 **Stars:** \`100 stars\`, \`50 stars uzs\`\n` +
-        `🔸 **Premium:** \`3 premium\`, \`6 premium uzs\`, \`12 premium\`\n` +
-        `🔸 **Komissiya:** \`1000 ton com 5\`\n` +
+        `🔸 **Premium:** \`3 premium\`, \`6 premium usdt\`, \`12 premium\`\n` +
+        `🔸 **Komissiya:** \`1000 gram com 5\`\n` + 
         `🔸 **Foiz:** \`15000 5%\`\n` +
         `🔸 **Matematika:** \`44*6\`, \`100/4\`\n\n` +
         `⚡️ Kurslar XE.com, Bitget va Fragment-dan real-vaqtda olinadi.`;
     ctx.replyWithMarkdown(h);
 });
 
-bot.on('text', async (ctx) => {
-    const text = ctx.message.text.toLowerCase().replace(/,/g, '.').trim();
+// --- MAIN HANDLING LOGIC ---
+async function handleConversion(ctx) {
+    if (!ctx.message || !ctx.message.text || ctx.from?.is_bot) return;
 
-    // A. Premium (masalan: 3 premium uzs)
+    let text = ctx.message.text.toLowerCase().replace(/,/g, '.').trim();
+
+    // === XATOLIKLARNI TO'G'RILASH VA TON/GRAM, USD/USDT ALOQALARI ===
+    text = text.replace(/^(\d+(?:\.\d+)?)\s*(gram|ton|usd|usdt)\d*$/, '$1 $2');
+
+    if (text.includes('ton')) {
+        text = text.replace(/\bton\b/g, 'gram');
+    }
+
+    if (text.includes('usd') && !text.includes('usdt')) {
+        text = text.replace(/\busd\b/g, 'usdt');
+    }
+    // =======================================================
+
+    // A. Premium
     const m_prem = text.match(/^(\d+)\s+premium(?:\s+([a-z]+))?$/);
     if (m_prem) {
         const m = parseInt(m_prem[1]);
-        const tSym = (m_prem[2] || "USD").toUpperCase();
+        const tSym = (m_prem[2] || "USDT").toUpperCase();
         if (state.premium[m]) {
             const usdVal = state.premium[m];
             const tVal = await getVal(tSym);
             const resText = `🌟 **Telegram Premium (${m} oy)**\n\n💰 Narxi: \`${fmt(usdVal / tVal, tSym)} ${tSym}\`\n\n${await getExtras(usdVal, tSym)}`;
-            return ctx.replyWithMarkdown(resText, Markup.inlineKeyboard([[Markup.button.callback("🗑 O'chirish", `del_${ctx.from.id}`)]]));
+            return ctx.replyWithMarkdown(resText, {
+                reply_to_message_id: ctx.message.message_id,
+                ...Markup.inlineKeyboard([[Markup.button.callback("🗑 O'chirish", `del_${ctx.from.id}`)]])
+            });
         }
     }
 
-    // B. Komissiya (1000 ton com 5)
+    // B. Komissiya
     const m_com = text.match(/^(\d+(?:\.\d+)?)\s+([a-z0-9]+)\s+com\s+(\d+(?:\.\d+)?)$/);
     if (m_com) {
         const amt = parseFloat(m_com[1]);
@@ -169,20 +213,20 @@ bot.on('text', async (ctx) => {
         const rate = await getVal(sym);
         if (rate) {
             const resText = `⚖️ **Komissiya: ${prc}%**\n\n✅ Qoladi: \`${fmt(res, sym)} ${sym}\`\n\n${await getExtras(res * rate, sym)}`;
-            return ctx.replyWithMarkdown(resText, Markup.inlineKeyboard([[Markup.button.callback("🗑 O'chirish", `del_${ctx.from.id}`)]]));
+            return ctx.replyWithMarkdown(resText, {
+                reply_to_message_id: ctx.message.message_id,
+                ...Markup.inlineKeyboard([[Markup.button.callback("🗑 O'chirish", `del_${ctx.from.id}`)]])
+            });
         }
     }
 
-    // C. Foiz (Masalan: 120 45% yoki 15000+500 10%)
+    // C. Foiz
     const m_perc = text.match(/^([\d\s\+\-\*\/\(\)\.]+)\s+(\d+(?:\.\d+)?)\s*%$/);
     if (m_perc) {
         try {
-            // Birinchi qismni (son yoki amalni) hisoblab olamiz
             const baseText = m_perc[1].trim();
             const base = math.evaluate(baseText);
             const prc = parseFloat(m_perc[2]);
-
-            // Foizni hisoblash (yaxlitlamasdan, boricha)
             const res = math.divide(math.multiply(base, prc), 100);
 
             const resText = `📊 **${prc}% Hisobi**\n\n` +
@@ -191,33 +235,22 @@ bot.on('text', async (ctx) => {
                 `➕ Jami (+): \`${fmt(math.add(base, res))}\`\n` +
                 `➖ Ayirma (-): \`${fmt(math.subtract(base, res))}\``;
 
-            return ctx.replyWithMarkdown(resText,
-                Markup.inlineKeyboard([[Markup.button.callback("🗑 O'chirish", `del_${ctx.from.id}`)]])
-            );
-        } catch (e) {
-            console.error("Foiz hisoblashda xato:", e);
-        }
+            return ctx.replyWithMarkdown(resText, {
+                reply_to_message_id: ctx.message.message_id,
+                ...Markup.inlineKeyboard([[Markup.button.callback("🗑 O'chirish", `del_${ctx.from.id}`)]])
+            });
+        } catch (e) { console.error("Foiz hisoblashda xato:", e); }
     }
 
-    // D & E. Matematika + Konvertatsiya (Barcha amallar uchun: +, -, *, /)
+    // D & E. Matematika + Konvertatsiya
     const m_pair = text.match(/^([\d\s\+\-\*\/\(\)\.]+)\s+([a-z][a-z0-9]*)(?:\s+(?:to\s+)?([a-z][a-z0-9]*))?$/);
-
     if (m_pair) {
         try {
             const expression = m_pair[1].trim();
             const fSym = m_pair[2].toUpperCase();
-            const tSym = (m_pair[3] || "USD").toUpperCase();
+            const tSym = (m_pair[3] || "USDT").toUpperCase();
 
-            // Matematik amal bormi? (Endi barcha belgilar tekshiriladi)
-            let amt;
-            if (/[\+\-\*\/]/.test(expression)) {
-                // math.evaluate har qanday murakkablikdagi (58*2 yoki 21310/485) amalni yechadi
-                amt = math.evaluate(expression);
-            } else {
-                amt = parseFloat(expression);
-            }
-
-            // IsNaN tekshiruvi va xavfsizlik
+            let amt = /[\+\-\*\/]/.test(expression) ? math.evaluate(expression) : parseFloat(expression);
             if (amt === null || amt === undefined || isNaN(amt)) return;
 
             const fVal = await getVal(fSym);
@@ -225,42 +258,41 @@ bot.on('text', async (ctx) => {
             const crypto = await getPrice(fSym);
 
             if (fVal && tVal) {
-                // Aniq hisoblash (yaxlitlamasdan)
                 const usd = math.multiply(amt, fVal);
                 const res = math.divide(usd, tVal);
+                let info = crypto && fSym !== "USDT" ? `\n${crypto.change >= 0 ? '🟢' : '🔴'} 24s: \`${crypto.change >= 0 ? '+' : ''}${crypto.change.toFixed(2)}%\`` : "";
 
-                let info = crypto ? `\n${crypto.change >= 0 ? '🟢' : '🔴'} 24s: \`${crypto.change >= 0 ? '+' : ''}${crypto.change.toFixed(2)}%\`` : "";
-
-                // Sarlavha mantiqi - ifodani kod bloki ichiga olamiz (backtick ` ` bilan)
                 const isMath = /[\+\-\*\/]/.test(expression);
-                const header = isMath
-                    ? `🔢 \`${expression}\` **= ${fmt(amt, fSym)} ${fSym}**`
-                    : `🔄 **${fmt(amt, fSym)} ${fSym}**`;
-
+                const header = isMath ? `🔢 \`${expression}\` **= ${fmt(amt, fSym)} ${fSym}**` : `🔄 **${fmt(amt, fSym)} ${fSym}**`;
                 const resText = `${header}\n🪙 \`${fmt(res, tSym)} ${tSym}\`${info}\n\n${await getExtras(usd, tSym)}`;
 
-                return ctx.replyWithMarkdown(resText, Markup.inlineKeyboard([[Markup.button.callback("🗑 O'chirish", `del_${ctx.from.id}`)]]));
+                return ctx.replyWithMarkdown(resText, {
+                    reply_to_message_id: ctx.message.message_id,
+                    ...Markup.inlineKeyboard([[Markup.button.callback("🗑 O'chirish", `del_${ctx.from.id}`)]])
+                });
             }
-        } catch (e) {
-            // Agar matematik xato bo'lsa (masalan 0 ga bo'lish), bot jim qoladi yoki log yozadi
-            console.error("Hisoblash xatosi:", e.message);
-        }
+        } catch (e) { console.error("Hisoblash xatosi:", e.message); }
     }
 
-    // Oddiy Matematika (Valyutasiz bo'lsa)
+    // Oddiy Matematika (Valyutasiz)
     if (/^[0-9\+\-\*\/\(\)\.\s]+$/.test(text) && /[\+\-\*\/]/.test(text)) {
         try {
             const calc = math.evaluate(text);
-            return ctx.replyWithMarkdown(`\`${text} = ${calc.toLocaleString()}\``, Markup.inlineKeyboard([[Markup.button.callback("🗑 O'chirish", `del_${ctx.from.id}`)]]));
+            return ctx.replyWithMarkdown(`\`${text} = ${calc.toLocaleString()}\``, {
+                reply_to_message_id: ctx.message.message_id,
+                ...Markup.inlineKeyboard([[Markup.button.callback("🗑 O'chirish", `del_${ctx.from.id}`)]])
+            });
         } catch (e) { }
     }
-});
+}
+
+bot.on('text', (ctx) => handleConversion(ctx));
 
 bot.action(/del_(\d+)/, (ctx) => {
     if (ctx.from.id.toString() === ctx.match[1]) ctx.deleteMessage().catch(() => { });
 });
 
-const app = express();
-app.get('/', (req, res) => res.send('Not Snap is Live!'));
-app.listen(PORT);
+const server = express();
+server.get('/', (req, res) => res.send('Not Snap is Live!'));
+server.listen(PORT);
 bot.launch();
