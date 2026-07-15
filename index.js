@@ -10,17 +10,14 @@ dotenv.config();
 const API_TOKEN = process.env.API_TOKEN || "";
 const PORT = process.env.PORT || 5000;
 
-// Agar muhit o'zgaruvchilarida domen bo'lsa ishlatiladi, aks holda dinamik aniqlanadi
-let APP_URL = process.env.APP_URL || ""; 
-
 const bot = new Telegraf(API_TOKEN);
 
 // Keshlar va sozlamalar uchun in-memory xotira
 const state = {
     uzs: 12850.0,
     rub: 92.5,
-    stars_usd: 0.015, 
-    premium: { 3: 12.0, 6: 16.0, 12: 29.0 }, 
+    stars_usd: 0.015,
+    premium: { 3: 12.0, 6: 16.0, 12: 29.0 },
     last_updated: null,
     alerts: []
 };
@@ -41,11 +38,11 @@ async function fetchXERate(from, to) {
 // --- 2. BITGET KRIPTO KURS ---
 async function getPrice(symbol) {
     let sym = symbol.toUpperCase();
-    
+
     if (sym === "GRAM" || sym === "TON") sym = "GRAM";
     if (sym === "USD" || sym === "USDT") sym = "USD";
-    
-    if (sym === "USDT") return { price: 1.0, change: 0.0 }; 
+
+    if (sym === "USDT") return { price: 1.0, change: 0.0 };
     try {
         const res = await axios.get(`https://api.bitget.com/api/v2/spot/market/tickers?symbol=${sym}USDT`);
         if (res.data.code === '00000' && res.data.data?.[0]) {
@@ -67,7 +64,11 @@ async function fetchFragmentData() {
         });
         const $s = cheerio.load(starsPage.data);
         const starsTonRaw = $s('.tm-stars-buy-total').first().text() || $s('button .tm-button-label').text();
-        const starsTon = parseFloat(starsTonRaw.replace(/[^\d.]/g, '')); 
+        const starsTon = parseFloat(starsTonRaw.replace(/[^\d.]/g, ''));
+
+        if (starsTon > 0) {
+            state.stars_usd = (starsTon * tonData.price) / 100;
+        }
 
         // PREMIUM
         const months = [3, 6, 12];
@@ -155,7 +156,7 @@ function fmt(val, sym = "") {
 
 async function getVal(s) {
     let sym = s.toUpperCase();
-    
+
     if (sym === "USD" || sym === "USDT") sym = "USDT";
     if (sym === "GRAM" || sym === "TON") {
         const tonD = await getPrice('TON');
@@ -166,7 +167,7 @@ async function getVal(s) {
     if (sym === "UZS") return 1 / state.uzs;
     if (sym === "RUB") return 1 / state.rub;
     if (sym === "STARS") return state.stars_usd;
-    
+
     const d = await getPrice(sym);
     return d ? d.price : null;
 }
@@ -178,48 +179,32 @@ async function getExtras(usdVal, exclude = "") {
 
     const tonD = await getPrice('TON');
     const lines = [];
-    
+
     if (exc !== "UZS") lines.push(`🇺🇿 \`${fmt(usdVal * state.uzs, 'UZS')} UZS\``);
     if (exc !== "RUB") lines.push(`🇷🇺 \`${fmt(usdVal * state.rub, 'RUB')} RUB\``);
     if (exc !== "STARS") lines.push(`⭐ \`${fmt(usdVal / state.stars_usd, 'STARS')} Stars\``);
-    
+
     if (exc !== "USD") lines.push(`💎 \`$${fmt(usdVal, 'USD')} USD\``);
     if (tonD && exc !== "GRAM") lines.push(`💎 \`${(usdVal / tonD.price).toFixed(3)} GRAM\``);
-    
-    return lines.join("\n");
-}
 
-function getCryptoAdvice(change) {
-    let advice = "";
-    if (change > 8) {
-        advice = "📈 **Tahliliy Tavsiya:** Bozorda kuchli o'sish tendensiyasi kuzatilmoqda. Hozirda qisman foyda realizatsiya qilish (sotish) yoki trend barqarorlashguncha kutish oqilona bo'lishi mumkin.";
-    } else if (change > 1 && change <= 8) {
-        advice = "🟢 **Tahliliy Tavsiya:** Aktiv mo'tadil o'sishda. Agar uzoq muddatli investor bo'lsangiz, ushlab turish (HODL) maqsadga muvofiq.";
-    } else if (change < -8) {
-        advice = "🔴 **Tahliliy Tavsiya:** Keskin tushish kuzatildi. Agar fundamental ishonchingiz yuqori bo'lsa, past narxlarda sotib olish (DCA) uchun qulay fursat bo'lishi mumkin. Lekin ehtiyot bo'ling!";
-    } else if (change < 0 && change >= -8) {
-        advice = "📉 **Tahliliy Tavsiya:** Kichik korreksiya holati. Sarosimaga tushib sotib yuborish tavsiya etilmaydi, narx qayta tiklanishini kutish ma'qul.";
-    } else {
-        advice = "🟡 **Tahliliy Tavsiya:** Bozor passiv holatda (Flat). Bu paytda kutish va bozordagi keyingi harakatni kuzatish eng xavfsiz yo'ldir.";
-    }
-    return advice + "\n*(Bu ma'lumot faqat tahliliy tavsiya bo'lib, moliyaviy maslahat hisoblanmaydi!)*";
+    return lines.join("\n");
 }
 
 // Eski xabarlarni o'tkazib yuborish
 bot.use(async (ctx, next) => {
-    const now = Math.floor(Date.now() / 1000); 
-    
+    const now = Math.floor(Date.now() / 1000);
+
     if (ctx.message) {
         const msgDate = ctx.message.date;
-        if (now - msgDate > 5) return; 
-    }
-    
-    if (ctx.callbackQuery && ctx.callbackQuery.message) {
-        const cbDate = ctx.callbackQuery.message.date;
-        if (now - cbDate > 10) return; 
+        if (now - msgDate > 5) return;
     }
 
-    await next(); 
+    if (ctx.callbackQuery && ctx.callbackQuery.message) {
+        const cbDate = ctx.callbackQuery.message.date;
+        if (now - cbDate > 10) return;
+    }
+
+    await next();
 });
 
 // --- 5. BOT HANDLERLARI ---
@@ -230,7 +215,7 @@ bot.help((ctx) => {
         `🔸 **Kripto (TON va Gram teng):** \`1 gram\`, \`1 ton uzs\`, \`1000 not usd\`\n` +
         `🔸 **Stars:** \`100 stars\`, \`50 stars uzs\`\n` +
         `🔸 **Premium:** \`3 premium\`, \`6 premium usd\`, \`12 premium\`\n` +
-        `🔸 **Komissiya:** \`1000 gram com 5\`\n` + 
+        `🔸 **Komissiya:** \`1000 gram com 5\`\n` +
         `🔸 **Foiz:** \`15000 5%\`\n` +
         `🔸 **Matematika:** \`44*6\`, \`100/4\`\n\n` +
         `🚨 **Narxga alert qo'yish imkoniyati:**\n` +
@@ -240,7 +225,7 @@ bot.help((ctx) => {
     ctx.replyWithMarkdown(h);
 });
 
-// --- 6. INLINE MODE (RASMLI KARTA CHIQARISH) ---
+// --- 6. INLINE MODE (FAQAT SO'RALGAN KURS) ---
 bot.on('inline_query', async (ctx) => {
     const query = ctx.inlineQuery.query.trim().toLowerCase();
     if (!query) return;
@@ -263,29 +248,23 @@ bot.on('inline_query', async (ctx) => {
 
         const fVal = await getVal(fSym);
         const tVal = await getVal(tSym);
-        
+
         if (fVal && tVal) {
             const usd = math.multiply(amt, fVal);
             const res = math.divide(usd, tVal);
-
-            // Agar APP_URL konfiguratsiya qilinmagan bo'lsa, xost nomini dinamik olishga harakat qilamiz
-            const baseDomain = APP_URL || "https://sizning-bot-domeningiz.render.com";
-            
-            // Telegram keshlab olmasligi uchun unikal timestamp qo'shamiz
             const ts = Date.now();
-            const cardImageUrl = `${baseDomain}/generate-card?amt=${encodeURIComponent(fmt(amt, fSym))}&from=${fSym}&to=${tSym}&res=${encodeURIComponent(fmt(res, tSym))}&v=${ts}`;
+
+            const messageText = `💱 1 ${fSym} = ${fmt(res, tSym)} ${tSym}`;
 
             return ctx.answerInlineQuery([{
-                type: 'photo',
+                type: 'article',
                 id: `convert_${ts}`,
                 title: `${fmt(amt, fSym)} ${fSym} = ${fmt(res, tSym)} ${tSym}`,
-                description: "Rasmli chiroyli karta ko'rinishida yuborish",
-                photo_url: cardImageUrl,
-                thumbnail_url: cardImageUrl,
+                description: `Kurs: 1 ${fSym} = ${fmt(fVal / tVal, tSym)} ${tSym}`,
                 input_message_content: {
-                    message_text: `🪙 **${fmt(amt, fSym)} ${fSym} = ${fmt(res, tSym)} ${tSym}**`,
+                    message_text: messageText,
                     parse_mode: 'Markdown'
-                }
+                },
             }], {
                 cache_time: 0,
                 is_personal: true
@@ -302,7 +281,7 @@ bot.command('alert', async (ctx) => {
     if (parts.length < 2) {
         return ctx.replyWithMarkdown("⚠️ Format: `/alert gram 7.5` yoki `/alert 20` ");
     }
-    
+
     let token = 'GRAM';
     let targetPrice;
 
@@ -341,7 +320,6 @@ async function handleConversion(ctx) {
 
     let text = ctx.message.text.toLowerCase().replace(/,/g, '.').trim();
 
-    // Gram va USD o'zgartirishlarini aniq regex bilan bajarish (yopishib qolmasligi uchun)
     text = text.replace(/\bton\b/g, 'gram');
     text = text.replace(/\busdt\b/g, 'usd');
 
@@ -393,11 +371,10 @@ async function handleConversion(ctx) {
             const prc = parseFloat(m_perc[2]);
             const res = math.divide(math.multiply(base, prc), 100);
 
-            const resText = `📊 **${prc}% Hisobi**\n\n` +
-                `🔢 Asos: \`${fmt(base)}\`\n` +
-                `🎯 Natija (${prc}%): \`${fmt(res)}\`\n` +
-                `➕ Jami (+): \`${fmt(math.add(base, res))}\`\n` +
-                `➖ Ayirma (-): \`${fmt(math.subtract(base, res))}\``;
+            const resText =
+                `${prc}% of ${fmt(base)} = ${fmt(res)}\n\n` +
+                `+ ${fmt(math.add(base, res))}\n` +
+                `- ${fmt(math.subtract(base, res))}`;
 
             return ctx.replyWithMarkdown(resText, {
                 reply_to_message_id: ctx.message.message_id,
@@ -431,11 +408,10 @@ async function handleConversion(ctx) {
                 const res = math.divide(usd, tVal);
                 let info = crypto && fSym !== "USD" ? `\n${crypto.change >= 0 ? '🟢' : '🔴'} 24s: \`${crypto.change >= 0 ? '+' : ''}${crypto.change.toFixed(2)}%\`` : "";
 
-                let adviceText = crypto && fSym !== "USD" ? `\n\n${getCryptoAdvice(crypto.change)}` : "";
                 const isMath = /[\+\-\*\/]/.test(expression);
                 const header = isMath ? `🔢 \`${expression}\` **= ${fmt(amt, fSym)} ${fSym}**` : `🔄 **${fmt(amt, fSym)} ${fSym}**`;
-                
-                const resText = `${header}\n🪙 \`${fmt(res, tSym)} ${tSym}\`${info}\n\n${await getExtras(usd, tSym)}${adviceText}`;
+
+                const resText = `${header}\n🪙 \`${fmt(res, tSym)} ${tSym}\`${info}\n\n${await getExtras(usd, tSym)}`;
 
                 return ctx.replyWithMarkdown(resText, {
                     reply_to_message_id: ctx.message.message_id,
@@ -459,99 +435,13 @@ async function handleConversion(ctx) {
 
 bot.on('text', (ctx) => handleConversion(ctx));
 
-// --- 9. MUKAMMAL O'CHIRISH (DELETE) ---
-bot.action(/del_(\d+)_(\d+)/, async (ctx) => {
-    const creatorId = ctx.match[1];
-    const triggerMessageId = parseInt(ctx.match[2]);
-    const clickedUserId = ctx.from.id.toString();
-
-    if (clickedUserId !== creatorId) {
-        return ctx.answerCallbackQuery({
-            text: "⚠️ Bu natijani faqat uni so'ragan foydalanuvchi o'chira oladi!",
-            show_alert: true
-        }).catch(() => {});
-    }
-
-    try {
-        await ctx.answerCallbackQuery({ text: "Tozalanmoqda..." }).catch(() => {});
-        await ctx.deleteMessage().catch(() => {});
-        if (triggerMessageId) {
-            await ctx.telegram.deleteMessage(ctx.chat.id, triggerMessageId).catch(() => {});
-        }
-    } catch (e) { }
+// --- 9. TO'LIQ VA XAVFSIZ O'CHIRISH (DELETE) ---
+bot.action(/del_(\d+)/, (ctx) => {
+    if (ctx.from.id.toString() === ctx.match[1]) ctx.deleteMessage().catch(() => { });
 });
-
-// --- 10. DINAMIK PNG / SVG KARTA GENERATORI ---
+// --- 10. SERVER ISHGA TUSHISHI ---
 const server = express();
-
-server.get('/generate-card', (req, res) => {
-    // Agar bot.env ichida APP_URL belgilanmagan bo'lsa, xostni so'rovdan dinamik aniqlaymiz
-    if (!APP_URL && req.headers.host) {
-        const protocol = req.headers['x-forwarded-proto'] || req.protocol;
-        APP_URL = `${protocol}://${req.headers.host}`;
-    }
-
-    const amt = req.query.amt || "1";
-    const from = (req.query.from || "GRAM").toUpperCase();
-    const to = (req.query.to || "UZS").toUpperCase();
-    const resultVal = req.query.res || "0";
-
-    // Kiruvchi belgilar
-    let fromIcon = `<path d="M 25 5 L 45 20 L 25 45 L 5 20 Z" fill="#3b9df8"/><path d="M 25 5 L 35 20 L 25 45 L 15 20 Z" fill="#76beff"/><polygon points="25,5 25,45 25,20" stroke="#ffffff" stroke-width="1" opacity="0.3"/>`;
-    if (from === "UZS") {
-        fromIcon = `<circle cx="25" cy="25" r="22" fill="#a0a5ab"/><text x="25" y="31" font-family="Arial, sans-serif" font-size="15" font-weight="bold" fill="#ffffff" text-anchor="middle">сўм</text>`;
-    } else if (from === "USD" || from === "USDT") {
-        fromIcon = `<circle cx="25" cy="25" r="22" fill="#2ecc71"/><text x="25" y="32" font-family="Arial, sans-serif" font-size="20" font-weight="bold" fill="#ffffff" text-anchor="middle">$</text>`;
-    }
-
-    // Chiquvchi belgilar
-    let toIcon = `<circle cx="25" cy="25" r="22" fill="#a0a5ab"/><text x="25" y="31" font-family="Arial, sans-serif" font-size="15" font-weight="bold" fill="#ffffff" text-anchor="middle">сўм</text>`;
-    if (to === "GRAM" || to === "TON") {
-        toIcon = `<g transform="translate(0, 0)"><path d="M 25 5 L 45 20 L 25 45 L 5 20 Z" fill="#3b9df8"/><path d="M 25 5 L 35 20 L 25 45 L 15 20 Z" fill="#76beff"/><polygon points="25,5 25,45 25,20" stroke="#ffffff" stroke-width="1" opacity="0.3"/></g>`;
-    } else if (to === "USD" || to === "USDT") {
-        toIcon = `<circle cx="25" cy="25" r="22" fill="#2ecc71"/><text x="25" y="32" font-family="Arial, sans-serif" font-size="20" font-weight="bold" fill="#ffffff" text-anchor="middle">$</text>`;
-    }
-
-    // SVG tuzilmasi
-    const svg = `
-    <svg width="600" height="400" viewBox="0 0 600 400" xmlns="http://www.w3.org/2000/svg">
-      <defs>
-        <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-          <stop offset="0%" stop-color="#1e355e" />
-          <stop offset="100%" stop-color="#0f1a30" />
-        </linearGradient>
-        <filter id="shadow" x="-5%" y="-5%" width="110%" height="110%">
-          <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#000000" flood-opacity="0.3"/>
-        </filter>
-      </defs>
-      
-      <rect width="600" height="400" rx="16" fill="url(#bgGrad)"/>
-      <rect x="50" y="50" width="500" height="300" rx="36" fill="#ffffff" filter="url(#shadow)"/>
-      
-      <!-- Birinchi qator -->
-      <g transform="translate(90, 100)">${fromIcon}</g>
-      <text x="160" y="135" font-family="Arial, sans-serif" font-size="28" font-weight="900" fill="#000000" letter-spacing="1">${from}</text>
-      <text x="510" y="135" font-family="Arial, sans-serif" font-size="32" font-weight="800" fill="#000000" text-anchor="end">${amt}</text>
-      
-      <!-- O'tish chizig'i -->
-      <line x1="90" y1="200" x2="510" y2="200" stroke="#e0e6ed" stroke-width="2"/>
-      <circle cx="300" cy="200" r="22" fill="#d9ebff"/>
-      <g transform="translate(300, 200) scale(1.1)">
-        <path d="M -4 -8 L -4 8 M -7 -3 L -4 -8 L -1 -3" fill="none" stroke="#3b9df8" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-        <path d="M 4 8 L 4 -8 M 1 3 L 4 8 L 7 3" fill="none" stroke="#3b9df8" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-      </g>
-      
-      <!-- Ikkinchi qator -->
-      <g transform="translate(90, 240)">${toIcon}</g>
-      <text x="160" y="275" font-family="Arial, sans-serif" font-size="28" font-weight="900" fill="#000000" letter-spacing="1">${to}</text>
-      <text x="510" y="275" font-family="Arial, sans-serif" font-size="32" font-weight="800" fill="#000000" text-anchor="end">${resultVal}</text>
-    </svg>`;
-
-    res.setHeader('Content-Type', 'image/svg+xml');
-    res.send(svg);
-});
-
-server.get('/', (req, res) => res.send('CoinSnap is Live!'));
+server.get('/', (req, res) => res.send('Not Snap is Live!'));
 server.listen(PORT, () => console.log(`Server portda faol: ${PORT}`));
 
 bot.launch();
