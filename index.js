@@ -254,7 +254,7 @@ bot.on('inline_query', async (ctx) => {
             const res = math.divide(usd, tVal);
             const ts = Date.now();
 
-            const messageText = `💱 1 ${fSym} = ${fmt(res, tSym)} ${tSym}`;
+            const messageText = `💱 ${amt} ${fSym} = ${fmt(res, tSym)} ${tSym}`;
 
             return ctx.answerInlineQuery([{
                 type: 'article',
