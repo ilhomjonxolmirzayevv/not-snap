@@ -52,42 +52,7 @@ async function getPrice(symbol) {
     } catch (e) { return null; }
 }
 
-// --- 3. FRAGMENT SCRAPER ---
-async function fetchFragmentData() {
-    try {
-        const tonData = await getPrice('TON');
-        if (!tonData) return;
 
-        // STARS
-        const starsPage = await axios.get('https://fragment.com/stars/buy?quantity=100', {
-            headers: { 'User-Agent': 'Mozilla/5.0' }
-        });
-        const $s = cheerio.load(starsPage.data);
-        const starsTonRaw = $s('.tm-stars-buy-total').first().text() || $s('button .tm-button-label').text();
-        const starsTon = parseFloat(starsTonRaw.replace(/[^\d.]/g, ''));
-
-        if (starsTon > 0) {
-            state.stars_usd = (starsTon * tonData.price) / 100;
-        }
-
-        // PREMIUM
-        const months = [3, 6, 12];
-        for (const m of months) {
-            const premPage = await axios.get(`https://fragment.com/premium/gift?months=${m}`, {
-                headers: { 'User-Agent': 'Mozilla/5.0' }
-            });
-            const $p = cheerio.load(premPage.data);
-            const premTonRaw = $p('.tm-stars-buy-total').first().text() || $p('.tm-button-label').text();
-            const premTon = parseFloat(premTonRaw.replace(/[^\d.]/g, ''));
-
-            if (premTon > 0) {
-                state.premium[m] = premTon * tonData.price;
-            }
-        }
-    } catch (e) {
-        console.error("Fragment xatosi:", e.message);
-    }
-}
 
 async function updateAllRates() {
     console.log("Kurslar yangilanmoqda...");
