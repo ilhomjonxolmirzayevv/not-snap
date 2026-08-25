@@ -19,8 +19,127 @@ const state = {
     stars_usd: 0.015,
     premium: { 3: 12.0, 6: 16.0, 12: 29.0 },
     last_updated: null,
-    alerts: []
+    alerts: [],
+    priceHistory: { GRAM: [] },   // 24s/7k trend uchun narx tarixi
+    users: {}                     // userId -> { lang, currency }
 };
+
+// Foydalanuvchi sozlamalarini olish (yo'q bo'lsa standart bilan yaratadi)
+function getUser(userId) {
+    if (!state.users[userId]) state.users[userId] = { lang: 'uz', currency: null };
+    return state.users[userId];
+}
+
+// --- KO'P TILLILIK ---
+const translations = {
+    uz: {
+        start: "👋 **CoinSnap Botga xush kelibsiz!**\n\nBuyruqlar qo'llanmasi: /help",
+        help: `📖 **Botdan foydalanish:**\n\n` +
+            `🔸 **Kripto (TON va Gram teng):** \`1 gram\`, \`1 ton uzs\`, \`5k gram usd\`\n` +
+            `🔸 **Stars:** \`100 stars\`, \`50 stars uzs\`\n` +
+            `🔸 **Premium:** \`3 premium\`, \`6 premium usd\`, \`12 premium\`\n` +
+            `🔸 **Komissiya:** \`1000 gram com 5\`\n` +
+            `🔸 **Foiz:** \`15000 5%\`\n` +
+            `🔸 **Matematika:** \`44*6\`, \`100/4\`\n` +
+            `🔸 **Qisqartma:** \`5k\` = 5000, \`50k\` = 50000\n\n` +
+            `🚨 **Alert:** \`/alert gram 7.5\` (yoki faqat \`/alert 20\` — GRAM deb hisoblanadi)\n` +
+            `📋 /rates — joriy kurslar\n` +
+            `🔔 /myalerts — faol alertlaringiz\n` +
+            `💱 /currency — standart valyuta\n` +
+            `🌐 /language — til tanlash`,
+        rates_title: "📊 **Joriy kurslar**",
+        last_updated: "Oxirgi yangilanish",
+        no_alerts: "🔕 Sizda faol alertlar yo'q. Qo'shish uchun: `/alert gram 7.5`",
+        your_alerts: "🔔 **Sizning faol alertlaringiz:**\nO'chirish uchun bosing 👇",
+        alert_deleted: "✅ Alert o'chirildi",
+        alert_not_found: "⚠️ Alert topilmadi",
+        alert_format: "⚠️ Format: `/alert gram 7.5` yoki `/alert 20`",
+        alert_bad_number: "Iltimos to'g'ri son kiriting.",
+        alert_price_unknown: (t) => `⚠️ ${t} narxini aniqlab bo'lmadi.`,
+        alert_saved: (token, price, dir) => `🚨 **Alert muvaffaqiyatli saqlandi!**\n**${token}** narxi **$${price}** qiymatga ${dir === 'UP' ? 'oshganda' : 'tushganda'} sizga xabar beramiz.`,
+        choose_currency: "💱 Standart valyuta tanlang (agar konvertatsiyada valyuta ko'rsatmasangiz, shu ishlatiladi):",
+        currency_set: (c) => `✅ Standart valyuta: **${c}**`,
+        reset: "O'chirish (USD)",
+        choose_language: "🌐 Tilni tanlang / Choose language / Выберите язык:",
+        language_set: "✅ Til o'zbekchaga o'zgartirildi",
+        delete_btn: "🗑 O'chirish",
+        trend_none: "—"
+    },
+    ru: {
+        start: "👋 **Добро пожаловать в CoinSnap Bot!**\n\nСписок команд: /help",
+        help: `📖 **Как пользоваться ботом:**\n\n` +
+            `🔸 **Крипто (TON и Gram равны):** \`1 gram\`, \`1 ton uzs\`, \`5k gram usd\`\n` +
+            `🔸 **Stars:** \`100 stars\`, \`50 stars uzs\`\n` +
+            `🔸 **Premium:** \`3 premium\`, \`6 premium usd\`, \`12 premium\`\n` +
+            `🔸 **Комиссия:** \`1000 gram com 5\`\n` +
+            `🔸 **Процент:** \`15000 5%\`\n` +
+            `🔸 **Математика:** \`44*6\`, \`100/4\`\n` +
+            `🔸 **Сокращение:** \`5k\` = 5000, \`50k\` = 50000\n\n` +
+            `🚨 **Оповещение:** \`/alert gram 7.5\` (или просто \`/alert 20\` — по умолчанию GRAM)\n` +
+            `📋 /rates — текущие курсы\n` +
+            `🔔 /myalerts — ваши оповещения\n` +
+            `💱 /currency — валюта по умолчанию\n` +
+            `🌐 /language — выбор языка`,
+        rates_title: "📊 **Текущие курсы**",
+        last_updated: "Последнее обновление",
+        no_alerts: "🔕 У вас нет активных оповещений. Добавить: `/alert gram 7.5`",
+        your_alerts: "🔔 **Ваши активные оповещения:**\nНажмите, чтобы удалить 👇",
+        alert_deleted: "✅ Оповещение удалено",
+        alert_not_found: "⚠️ Оповещение не найдено",
+        alert_format: "⚠️ Формат: `/alert gram 7.5` или `/alert 20`",
+        alert_bad_number: "Введите корректное число.",
+        alert_price_unknown: (t) => `⚠️ Не удалось определить цену ${t}.`,
+        alert_saved: (token, price, dir) => `🚨 **Оповещение сохранено!**\nСообщим, когда **${token}** ${dir === 'UP' ? 'вырастет до' : 'упадёт до'} **$${price}**.`,
+        choose_currency: "💱 Выберите валюту по умолчанию (будет использоваться, если вы не укажете валюту при конвертации):",
+        currency_set: (c) => `✅ Валюта по умолчанию: **${c}**`,
+        reset: "Сбросить (USD)",
+        choose_language: "🌐 Tilni tanlang / Choose language / Выберите язык:",
+        language_set: "✅ Язык изменён на русский",
+        delete_btn: "🗑 Удалить",
+        trend_none: "—"
+    },
+    en: {
+        start: "👋 **Welcome to CoinSnap Bot!**\n\nCommand list: /help",
+        help: `📖 **How to use the bot:**\n\n` +
+            `🔸 **Crypto (TON and Gram are equal):** \`1 gram\`, \`1 ton uzs\`, \`5k gram usd\`\n` +
+            `🔸 **Stars:** \`100 stars\`, \`50 stars uzs\`\n` +
+            `🔸 **Premium:** \`3 premium\`, \`6 premium usd\`, \`12 premium\`\n` +
+            `🔸 **Commission:** \`1000 gram com 5\`\n` +
+            `🔸 **Percent:** \`15000 5%\`\n` +
+            `🔸 **Math:** \`44*6\`, \`100/4\`\n` +
+            `🔸 **Shorthand:** \`5k\` = 5000, \`50k\` = 50000\n\n` +
+            `🚨 **Alert:** \`/alert gram 7.5\` (or just \`/alert 20\` — defaults to GRAM)\n` +
+            `📋 /rates — current rates\n` +
+            `🔔 /myalerts — your alerts\n` +
+            `💱 /currency — default currency\n` +
+            `🌐 /language — choose language`,
+        rates_title: "📊 **Current rates**",
+        last_updated: "Last updated",
+        no_alerts: "🔕 You have no active alerts. Add one: `/alert gram 7.5`",
+        your_alerts: "🔔 **Your active alerts:**\nTap to delete 👇",
+        alert_deleted: "✅ Alert deleted",
+        alert_not_found: "⚠️ Alert not found",
+        alert_format: "⚠️ Format: `/alert gram 7.5` or `/alert 20`",
+        alert_bad_number: "Please enter a valid number.",
+        alert_price_unknown: (t) => `⚠️ Couldn't determine the price of ${t}.`,
+        alert_saved: (token, price, dir) => `🚨 **Alert saved!**\nWe'll notify you when **${token}** ${dir === 'UP' ? 'rises to' : 'drops to'} **$${price}**.`,
+        choose_currency: "💱 Choose your default currency (used when you don't specify one in a conversion):",
+        currency_set: (c) => `✅ Default currency: **${c}**`,
+        reset: "Reset (USD)",
+        choose_language: "🌐 Tilni tanlang / Choose language / Выберите язык:",
+        language_set: "✅ Language switched to English",
+        delete_btn: "🗑 Delete",
+        trend_none: "—"
+    }
+};
+
+// Foydalanuvchi tiliga mos matnni qaytaradi
+function T(userId, key, ...args) {
+    const lang = getUser(userId).lang;
+    const dict = translations[lang] || translations.uz;
+    const val = dict[key] !== undefined ? dict[key] : translations.uz[key];
+    return typeof val === 'function' ? val(...args) : val;
+}
 
 // --- 1. XE.COM FIAT KURS ---
 async function fetchXERate(from, to) {
@@ -61,10 +180,35 @@ async function updateAllRates() {
     if (xeUzs) state.uzs = xeUzs;
     if (xeRub) state.rub = xeRub;
 
-    await fetchFragmentData();
+    // Stars narxi (state.stars_usd) va Premium narxlari (state.premium)
+    // qat'iy belgilangan qiymatlar bo'lib qoladi — birjadan yangilanmaydi.
     state.last_updated = new Date().toLocaleTimeString('uz-UZ', { hour: '2-digit', minute: '2-digit' });
 
+    // GRAM/TON narx tarixini saqlash (24s va 7 kunlik trend uchun)
+    const gramData = await getPrice('TON');
+    if (gramData) {
+        state.priceHistory.GRAM.push({ t: Date.now(), p: gramData.price });
+        const cutoff = Date.now() - 8 * 24 * 60 * 60 * 1000; // 8 kundan eskisini tozalash
+        state.priceHistory.GRAM = state.priceHistory.GRAM.filter(e => e.t >= cutoff);
+    }
+
     await checkAlerts();
+}
+
+// Berilgan token uchun N soat oldingi narxga nisbatan foizli o'zgarishni hisoblaydi
+function getTrend(token, hoursAgo) {
+    const hist = state.priceHistory[token];
+    if (!hist || hist.length === 0) return null;
+
+    const targetTime = Date.now() - hoursAgo * 60 * 60 * 1000;
+    let closest = hist[0];
+    for (const e of hist) {
+        if (e.t <= targetTime) closest = e; else break;
+    }
+    if (!closest || closest.p === 0) return null;
+
+    const current = hist[hist.length - 1].p;
+    return { change: ((current - closest.p) / closest.p) * 100, from: closest.p, to: current };
 }
 
 // Alert Tizimi
@@ -117,6 +261,13 @@ function fmt(val, sym = "") {
     if (s === "UZS" || s === "RUB") return val.toLocaleString('en-US', { maximumFractionDigits: 2 });
     if (s === "USDT" || s === "USD") return val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     return val.toFixed(8).replace(/\.?0+$/, "");
+}
+
+// "5k" -> "5000", "1.5k" -> "1500" ko'rinishidagi qisqartmalarni sonlarga aylantiradi
+function expandK(text) {
+    return text.replace(/(\d+(?:\.\d+)?)\s*k\b/g, (_, num) => {
+        return (parseFloat(num) * 1000).toString();
+    });
 }
 
 async function getVal(s) {
@@ -173,27 +324,40 @@ bot.use(async (ctx, next) => {
 });
 
 // --- 5. BOT HANDLERLARI ---
-bot.start((ctx) => ctx.replyWithMarkdown(`👋 **CoinSnap Botga xush kelibsiz!**\n\nBuyruqlar qo'llanmasi: /help`));
+bot.start((ctx) => ctx.replyWithMarkdown(T(ctx.from.id, 'start')));
 
-bot.help((ctx) => {
-    const h = `📖 **Botdan foydalanish:**\n\n` +
-        `🔸 **Kripto (TON va Gram teng):** \`1 gram\`, \`1 ton uzs\`, \`1000 not usd\`\n` +
-        `🔸 **Stars:** \`100 stars\`, \`50 stars uzs\`\n` +
-        `🔸 **Premium:** \`3 premium\`, \`6 premium usd\`, \`12 premium\`\n` +
-        `🔸 **Komissiya:** \`1000 gram com 5\`\n` +
-        `🔸 **Foiz:** \`15000 5%\`\n` +
-        `🔸 **Matematika:** \`44*6\`, \`100/4\`\n\n` +
-        `🚨 **Narxga alert qo'yish imkoniyati:**\n` +
-        `🔸 \`/alert gram 7.5\`\n` +
-        `*(Faqat bitta son yozsangiz GRAM deb hisoblanadi: \`/alert 20\`)*\n\n` +
-        `⚡️ Kurslar XE.com, Bitget va Fragment-dan real-vaqtda olinadi.`;
-    ctx.replyWithMarkdown(h);
+bot.help((ctx) => ctx.replyWithMarkdown(T(ctx.from.id, 'help')));
+
+// --- /RATES — JORIY KURSLAR ---
+bot.command(['rates', 'kurslar'], async (ctx) => {
+    const userId = ctx.from.id;
+    const gram = await getPrice('TON');
+    const trend24 = getTrend('GRAM', 24);
+    const trend7d = getTrend('GRAM', 24 * 7);
+
+    const trendStr = (tr) => {
+        if (!tr) return T(userId, 'trend_none');
+        const arrow = tr.change >= 0 ? '📈' : '📉';
+        return `${arrow} ${tr.change >= 0 ? '+' : ''}${tr.change.toFixed(2)}%`;
+    };
+
+    const msg =
+        `${T(userId, 'rates_title')}\n\n` +
+        `🇺🇿 1 USD = \`${fmt(state.uzs, 'UZS')}\` UZS\n` +
+        `🇷🇺 1 USD = \`${fmt(state.rub, 'RUB')}\` RUB\n` +
+        `💎 GRAM/TON = \`$${gram ? fmt(gram.price, 'USD') : '—'}\`  (24s: ${trendStr(trend24)} · 7k: ${trendStr(trend7d)})\n` +
+        `⭐ Stars = \`$${state.stars_usd}\`\n\n` +
+        `🕐 ${T(userId, 'last_updated')}: ${state.last_updated || '—'}`;
+
+    ctx.replyWithMarkdown(msg);
 });
 
 // --- 6. INLINE MODE (FAQAT SO'RALGAN KURS) ---
 bot.on('inline_query', async (ctx) => {
-    const query = ctx.inlineQuery.query.trim().toLowerCase();
+    let query = ctx.inlineQuery.query.trim().toLowerCase();
     if (!query) return;
+
+    query = expandK(query);
 
     const match = query.match(/^([\d\s\+\-\*\/\(\)\.]+)\s+([a-z][a-z0-9]*)(?:\s+(?:to\s+)?([a-z][a-z0-9]*))?$/);
     if (!match) return;
@@ -201,7 +365,7 @@ bot.on('inline_query', async (ctx) => {
     try {
         const expression = match[1].trim();
         let fSym = match[2].toUpperCase();
-        let tSym = (match[3] || "USD").toUpperCase();
+        let tSym = (match[3] || getUser(ctx.from.id).currency || "USD").toUpperCase();
 
         if (fSym === "TON") fSym = "GRAM";
         if (fSym === "USDT") fSym = "USD";
@@ -242,9 +406,10 @@ bot.on('inline_query', async (ctx) => {
 
 // --- 7. ALERT COMMAND ---
 bot.command('alert', async (ctx) => {
+    const userId = ctx.from.id;
     const parts = ctx.message.text.split(' ');
     if (parts.length < 2) {
-        return ctx.replyWithMarkdown("⚠️ Format: `/alert gram 7.5` yoki `/alert 20` ");
+        return ctx.replyWithMarkdown(T(userId, 'alert_format'));
     }
 
     let token = 'GRAM';
@@ -260,23 +425,95 @@ bot.command('alert', async (ctx) => {
     if (token === "TON") token = "GRAM";
     if (token === "USDT") token = "USD";
 
-    if (isNaN(targetPrice)) return ctx.reply("Iltimos to'g'ri son kiriting.");
+    if (isNaN(targetPrice)) return ctx.reply(T(userId, 'alert_bad_number'));
 
     const currentPrice = await getVal(token);
-    if (!currentPrice) return ctx.reply(`⚠️ ${token} narxini aniqlab bo'lmadi.`);
+    if (!currentPrice) return ctx.reply(T(userId, 'alert_price_unknown', token));
 
     const direction = currentPrice <= targetPrice ? 'UP' : 'DOWN';
 
     state.alerts.push({
+        id: `${Date.now()}${Math.floor(Math.random() * 1000)}`,
         chatId: ctx.chat.id,
-        username: ctx.from.username ? `@${ctx.from.username}` : `User_${ctx.from.id}`,
+        fromId: userId,
+        username: ctx.from.username ? `@${ctx.from.username}` : `User_${userId}`,
         token,
         targetPrice,
         direction
     });
 
-    const dirMsg = direction === 'UP' ? "oshganda" : "tushganda";
-    ctx.replyWithMarkdown(`🚨 **Alert muvaffaqiyatli saqlandi!**\n**${token}** narxi **$${targetPrice}** qiymatga ${dirMsg} sizga xabar beramiz.`);
+    ctx.replyWithMarkdown(T(userId, 'alert_saved', token, targetPrice, direction));
+});
+
+// --- /MYALERTS — FOYDALANUVCHI ALERTLARI RO'YXATI VA O'CHIRISH ---
+bot.command(['myalerts', 'alertlarim'], async (ctx) => {
+    const userId = ctx.from.id;
+    const myAlerts = state.alerts.filter(a => a.fromId === userId);
+
+    if (myAlerts.length === 0) {
+        return ctx.replyWithMarkdown(T(userId, 'no_alerts'));
+    }
+
+    const buttons = myAlerts.map(a => [
+        Markup.button.callback(`❌ ${a.token} → $${a.targetPrice}`, `delalert_${a.id}`)
+    ]);
+
+    ctx.replyWithMarkdown(T(userId, 'your_alerts'), Markup.inlineKeyboard(buttons));
+});
+
+// Alertni ro'yxatdan o'chirish
+bot.action(/delalert_(.+)/, (ctx) => {
+    const userId = ctx.from.id;
+    const alertId = ctx.match[1];
+    const idx = state.alerts.findIndex(a => a.id === alertId && a.fromId === userId);
+
+    if (idx === -1) {
+        return ctx.answerCbQuery(T(userId, 'alert_not_found'));
+    }
+
+    state.alerts.splice(idx, 1);
+    ctx.answerCbQuery(T(userId, 'alert_deleted'));
+    ctx.deleteMessage().catch(() => { });
+});
+
+// --- /CURRENCY — STANDART VALYUTA TANLASH ---
+bot.command(['currency', 'valyuta'], (ctx) => {
+    const userId = ctx.from.id;
+    ctx.replyWithMarkdown(T(userId, 'choose_currency'), Markup.inlineKeyboard([
+        [Markup.button.callback('🇺🇿 UZS', 'setcur_UZS'), Markup.button.callback('🇷🇺 RUB', 'setcur_RUB')],
+        [Markup.button.callback('💵 USD', 'setcur_USD'), Markup.button.callback('⭐ Stars', 'setcur_STARS')],
+        [Markup.button.callback('💎 GRAM', 'setcur_GRAM')],
+        [Markup.button.callback('↩️ ' + T(userId, 'reset'), 'setcur_NONE')]
+    ]));
+});
+
+bot.action(/setcur_(.+)/, (ctx) => {
+    const userId = ctx.from.id;
+    const cur = ctx.match[1];
+    const user = getUser(userId);
+    user.currency = cur === 'NONE' ? null : cur;
+
+    ctx.answerCbQuery();
+    ctx.editMessageText(T(userId, 'currency_set', user.currency || 'USD'), { parse_mode: 'Markdown' });
+});
+
+// --- /LANGUAGE — TIL TANLASH ---
+bot.command(['language', 'til', 'язык'], (ctx) => {
+    const userId = ctx.from.id;
+    ctx.replyWithMarkdown(T(userId, 'choose_language'), Markup.inlineKeyboard([
+        [
+            Markup.button.callback("🇺🇿 O'zbek", 'setlang_uz'),
+            Markup.button.callback('🇷🇺 Русский', 'setlang_ru'),
+            Markup.button.callback('🇬🇧 English', 'setlang_en')
+        ]
+    ]));
+});
+
+bot.action(/setlang_(uz|ru|en)/, (ctx) => {
+    const userId = ctx.from.id;
+    getUser(userId).lang = ctx.match[1];
+    ctx.answerCbQuery();
+    ctx.editMessageText(T(userId, 'language_set'), { parse_mode: 'Markdown' });
 });
 
 // --- 8. MATNLARNI QAYTA ISHLASH (MAIN HANDLER) ---
@@ -285,6 +522,7 @@ async function handleConversion(ctx) {
 
     let text = ctx.message.text.toLowerCase().replace(/,/g, '.').trim();
 
+    text = expandK(text);
     text = text.replace(/\bton\b/g, 'gram');
     text = text.replace(/\busdt\b/g, 'usd');
 
@@ -292,7 +530,7 @@ async function handleConversion(ctx) {
     const m_prem = text.match(/^(\d+)\s+premium(?:\s+([a-z]+))?$/);
     if (m_prem) {
         const m = parseInt(m_prem[1]);
-        let tSym = (m_prem[2] || "USD").toUpperCase();
+        let tSym = (m_prem[2] || getUser(ctx.from.id).currency || "USD").toUpperCase();
         if (tSym === "USDT") tSym = "USD";
         if (tSym === "TON") tSym = "GRAM";
 
@@ -302,7 +540,7 @@ async function handleConversion(ctx) {
             const resText = `🌟 **Telegram Premium (${m} oy)**\n\n💰 Narxi: \`${fmt(usdVal / tVal, tSym)} ${tSym}\`\n\n${await getExtras(usdVal, tSym)}`;
             return ctx.replyWithMarkdown(resText, {
                 reply_to_message_id: ctx.message.message_id,
-                ...Markup.inlineKeyboard([[Markup.button.callback("🗑 O'chirish", `del_${ctx.from.id}_${ctx.message.message_id}`)]])
+                ...Markup.inlineKeyboard([[Markup.button.callback(T(ctx.from.id, 'delete_btn'), `del_${ctx.from.id}_${ctx.message.message_id}`)]])
             });
         }
     }
@@ -322,7 +560,7 @@ async function handleConversion(ctx) {
             const resText = `⚖️ **Komissiya: ${prc}%**\n\n✅ Qoladi: \`${fmt(res, sym)} ${sym}\`\n\n${await getExtras(res * rate, sym)}`;
             return ctx.replyWithMarkdown(resText, {
                 reply_to_message_id: ctx.message.message_id,
-                ...Markup.inlineKeyboard([[Markup.button.callback("🗑 O'chirish", `del_${ctx.from.id}_${ctx.message.message_id}`)]])
+                ...Markup.inlineKeyboard([[Markup.button.callback(T(ctx.from.id, 'delete_btn'), `del_${ctx.from.id}_${ctx.message.message_id}`)]])
             });
         }
     }
@@ -343,7 +581,7 @@ async function handleConversion(ctx) {
 
             return ctx.replyWithMarkdown(resText, {
                 reply_to_message_id: ctx.message.message_id,
-                ...Markup.inlineKeyboard([[Markup.button.callback("🗑 O'chirish", `del_${ctx.from.id}_${ctx.message.message_id}`)]])
+                ...Markup.inlineKeyboard([[Markup.button.callback(T(ctx.from.id, 'delete_btn'), `del_${ctx.from.id}_${ctx.message.message_id}`)]])
             });
         } catch (e) { }
     }
@@ -354,7 +592,7 @@ async function handleConversion(ctx) {
         try {
             const expression = m_pair[1].trim();
             let fSym = m_pair[2].toUpperCase();
-            let tSym = (m_pair[3] || "USD").toUpperCase();
+            let tSym = (m_pair[3] || getUser(ctx.from.id).currency || "USD").toUpperCase();
 
             if (fSym === "TON") fSym = "GRAM";
             if (fSym === "USDT") fSym = "USD";
@@ -380,7 +618,7 @@ async function handleConversion(ctx) {
 
                 return ctx.replyWithMarkdown(resText, {
                     reply_to_message_id: ctx.message.message_id,
-                    ...Markup.inlineKeyboard([[Markup.button.callback("🗑 O'chirish", `del_${ctx.from.id}_${ctx.message.message_id}`)]])
+                    ...Markup.inlineKeyboard([[Markup.button.callback(T(ctx.from.id, 'delete_btn'), `del_${ctx.from.id}_${ctx.message.message_id}`)]])
                 });
             }
         } catch (e) { }
@@ -392,7 +630,7 @@ async function handleConversion(ctx) {
             const calc = math.evaluate(text);
             return ctx.replyWithMarkdown(`\`${text} = ${calc.toLocaleString()}\``, {
                 reply_to_message_id: ctx.message.message_id,
-                ...Markup.inlineKeyboard([[Markup.button.callback("🗑 O'chirish", `del_${ctx.from.id}_${ctx.message.message_id}`)]])
+                ...Markup.inlineKeyboard([[Markup.button.callback(T(ctx.from.id, 'delete_btn'), `del_${ctx.from.id}_${ctx.message.message_id}`)]])
             });
         } catch (e) { }
     }
