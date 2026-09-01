@@ -300,7 +300,7 @@ async function getExtras(usdVal, exclude = "") {
     if (exc !== "RUB") lines.push(`🇷🇺 \`${fmt(usdVal * state.rub, 'RUB')} RUB\``);
     if (exc !== "STARS") lines.push(`⭐ \`${fmt(usdVal / state.stars_usd, 'STARS')} Stars\``);
 
-    if (exc !== "USD") lines.push(`💎 \`$${fmt(usdVal, 'USD')} USD\``);
+    if (exc !== "USD") lines.push(`🇺🇸 \`$${fmt(usdVal, 'USD')} USD\``);
     if (tonD && exc !== "GRAM") lines.push(`💎 \`${(usdVal / tonD.price).toFixed(3)} GRAM\``);
 
     return lines.join("\n");
@@ -481,7 +481,7 @@ bot.command(['currency', 'valyuta'], (ctx) => {
     const userId = ctx.from.id;
     ctx.replyWithMarkdown(T(userId, 'choose_currency'), Markup.inlineKeyboard([
         [Markup.button.callback('🇺🇿 UZS', 'setcur_UZS'), Markup.button.callback('🇷🇺 RUB', 'setcur_RUB')],
-        [Markup.button.callback('💵 USD', 'setcur_USD'), Markup.button.callback('⭐ Stars', 'setcur_STARS')],
+        [Markup.button.callback('🇺🇸 USD', 'setcur_USD'), Markup.button.callback('⭐ Stars', 'setcur_STARS')],
         [Markup.button.callback('💎 GRAM', 'setcur_GRAM')],
         [Markup.button.callback('↩️ ' + T(userId, 'reset'), 'setcur_NONE')]
     ]));
