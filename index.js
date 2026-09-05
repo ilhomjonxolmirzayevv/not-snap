@@ -292,6 +292,8 @@ async function getExtras(usdVal, exclude = "") {
     let exc = exclude.toUpperCase();
     if (exc === "USD" || exc === "USDT") exc = "USD";
     if (exc === "GRAM" || exc === "TON") exc = "GRAM";
+    if (exc === "GRAN" || exc === "SOMSA") exc = "GRAM";
+    
 
     const tonD = await getPrice('TON');
     const lines = [];
@@ -345,7 +347,7 @@ bot.command(['rates', 'kurslar'], async (ctx) => {
         `${T(userId, 'rates_title')}\n\n` +
         `🇺🇿 1 USD = \`${fmt(state.uzs, 'UZS')}\` UZS\n` +
         `🇷🇺 1 USD = \`${fmt(state.rub, 'RUB')}\` RUB\n` +
-        `💎 GRAM/TON = \`$${gram ? fmt(gram.price, 'USD') : '—'}\`  (24s: ${trendStr(trend24)} · 7k: ${trendStr(trend7d)})\n` +
+        `💎 GRAM/UZS = \`$${gram ? fmt(gram.price, 'USD') : '—'}\`  (24s: ${trendStr(trend24)} · 7k: ${trendStr(trend7d)})\n` +
         `⭐ Stars = \`$${state.stars_usd}\`\n\n` +
         `🕐 ${T(userId, 'last_updated')}: ${state.last_updated || '—'}`;
 
@@ -371,6 +373,8 @@ bot.on('inline_query', async (ctx) => {
         if (fSym === "USDT") fSym = "USD";
         if (tSym === "TON") tSym = "GRAM";
         if (tSym === "USDT") tSym = "USD";
+        if (tSym === "SOMSA") tSym = "GRAM";
+        
 
         let amt = /[\+\-\*\/]/.test(expression) ? math.evaluate(expression) : parseFloat(expression);
         if (isNaN(amt)) return;
@@ -424,6 +428,7 @@ bot.command('alert', async (ctx) => {
 
     if (token === "TON") token = "GRAM";
     if (token === "USDT") token = "USD";
+     if (tSym === "SOMSA") tSym = "GRAM";
 
     if (isNaN(targetPrice)) return ctx.reply(T(userId, 'alert_bad_number'));
 
@@ -552,6 +557,7 @@ async function handleConversion(ctx) {
         let sym = m_com[2].toUpperCase();
         if (sym === "TON") sym = "GRAM";
         if (sym === "USDT") sym = "USD";
+         if (tSym === "SOMSA") tSym = "GRAM";
 
         const prc = parseFloat(m_com[3]);
         const res = amt - (amt * prc / 100);
@@ -598,6 +604,7 @@ async function handleConversion(ctx) {
             if (fSym === "USDT") fSym = "USD";
             if (tSym === "TON") tSym = "GRAM";
             if (tSym === "USDT") tSym = "USD";
+             if (tSym === "SOMSA") tSym = "GRAM";
 
             let amt = /[\+\-\*\/]/.test(expression) ? math.evaluate(expression) : parseFloat(expression);
             if (isNaN(amt)) return;
