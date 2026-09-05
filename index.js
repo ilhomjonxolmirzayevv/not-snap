@@ -10,6 +10,13 @@ dotenv.config();
 const API_TOKEN = process.env.API_TOKEN || "";
 const PORT = process.env.PORT || 5000;
 
+// Adminlar ro'yxati (to'g'ridan-to'g'ri kodga yozilgan)
+const ADMIN_IDS = ["1228723117"];
+
+function isAdmin(ctx) {
+    return ADMIN_IDS.includes(ctx.from.id.toString());
+}
+
 const bot = new Telegraf(API_TOKEN);
 
 // Keshlar va sozlamalar uchun in-memory xotira
@@ -21,7 +28,8 @@ const state = {
     last_updated: null,
     alerts: [],
     priceHistory: { GRAM: [] },   // 24s/7k trend uchun narx tarixi
-    users: {}                     // userId -> { lang, currency }
+    users: {},                    // userId -> { lang, currency }
+    aliases: { 'ton': 'gram', 'somsa': 'gram' }   // taxallus -> asosiy belgi (admin tomonidan boshqariladi)
 };
 
 // Foydalanuvchi sozlamalarini olish (yo'q bo'lsa standart bilan yaratadi)
@@ -63,7 +71,15 @@ const translations = {
         choose_language: "🌐 Tilni tanlang / Choose language / Выберите язык:",
         language_set: "✅ Til o'zbekchaga o'zgartirildi",
         delete_btn: "🗑 O'chirish",
-        trend_none: "—"
+        trend_none: "—",
+        not_admin: "⛔ Bu buyruq faqat adminlar uchun.",
+        alias_usage_add: "⚠️ Format: `/addalias somsa gram`\n(birinchi so'z — yangi nom, ikkinchisi — qaysi belgiga tenglashtiriladi: gram, usd, uzs, rub, stars)",
+        alias_usage_remove: "⚠️ Format: `/removealias somsa`",
+        alias_added: (alias, target) => `✅ **${alias}** endi **${target}** deb qabul qilinadi.`,
+        alias_removed: (alias) => `🗑 **${alias}** taxallusi o'chirildi.`,
+        alias_not_found: "⚠️ Bunday taxallus topilmadi.",
+        alias_list_title: "📋 **Joriy taxalluslar:**",
+        alias_list_empty: "📋 Hozircha taxalluslar yo'q."
     },
     ru: {
         start: "👋 **Добро пожаловать в CoinSnap Bot!**\n\nСписок команд: /help",
@@ -96,7 +112,15 @@ const translations = {
         choose_language: "🌐 Tilni tanlang / Choose language / Выберите язык:",
         language_set: "✅ Язык изменён на русский",
         delete_btn: "🗑 Удалить",
-        trend_none: "—"
+        trend_none: "—",
+        not_admin: "⛔ Эта команда только для админов.",
+        alias_usage_add: "⚠️ Формат: `/addalias somsa gram`\n(первое слово — новое название, второе — к какому символу приравнять: gram, usd, uzs, rub, stars)",
+        alias_usage_remove: "⚠️ Формат: `/removealias somsa`",
+        alias_added: (alias, target) => `✅ **${alias}** теперь распознаётся как **${target}**.`,
+        alias_removed: (alias) => `🗑 Псевдоним **${alias}** удалён.`,
+        alias_not_found: "⚠️ Такой псевдоним не найден.",
+        alias_list_title: "📋 **Текущие псевдонимы:**",
+        alias_list_empty: "📋 Псевдонимов пока нет."
     },
     en: {
         start: "👋 **Welcome to CoinSnap Bot!**\n\nCommand list: /help",
@@ -129,7 +153,15 @@ const translations = {
         choose_language: "🌐 Tilni tanlang / Choose language / Выберите язык:",
         language_set: "✅ Language switched to English",
         delete_btn: "🗑 Delete",
-        trend_none: "—"
+        trend_none: "—",
+        not_admin: "⛔ This command is for admins only.",
+        alias_usage_add: "⚠️ Format: `/addalias somsa gram`\n(first word — new name, second — which symbol it maps to: gram, usd, uzs, rub, stars)",
+        alias_usage_remove: "⚠️ Format: `/removealias somsa`",
+        alias_added: (alias, target) => `✅ **${alias}** is now recognized as **${target}**.`,
+        alias_removed: (alias) => `🗑 Alias **${alias}** removed.`,
+        alias_not_found: "⚠️ Alias not found.",
+        alias_list_title: "📋 **Current aliases:**",
+        alias_list_empty: "📋 No aliases yet."
     }
 };
 
@@ -270,16 +302,33 @@ function expandK(text) {
     });
 }
 
-async function getVal(s) {
-    let sym = s.toUpperCase();
+// state.aliases dagi barcha taxalluslarni (masalan "somsa" -> "gram") va "usdt" ni matnda almashtiradi
+function normalizeSymbols(text) {
+    let result = text.replace(/\busdt\b/g, 'usd');
+    for (const [alias, target] of Object.entries(state.aliases)) {
+        const re = new RegExp(`\\b${alias}\\b`, 'g');
+        result = result.replace(re, target);
+    }
+    return result;
+}
 
-    if (sym === "USD" || sym === "USDT") sym = "USDT";
-    if (sym === "GRAM" || sym === "TON") {
+// Har qanday belgi (yoki taxallus, masalan "somsa"/"ton") ni asosiy belgiga (masalan "GRAM") aylantiradi
+function resolveSymbol(sym) {
+    if (!sym) return sym;
+    const lower = sym.toLowerCase();
+    if (state.aliases[lower]) return state.aliases[lower].toUpperCase();
+    if (sym.toUpperCase() === "USDT") return "USD";
+    return sym.toUpperCase();
+}
+
+async function getVal(s) {
+    const sym = resolveSymbol(s);
+
+    if (sym === "USD") return 1.0;
+    if (sym === "GRAM") {
         const tonD = await getPrice('TON');
         return tonD ? tonD.price : null;
     }
-
-    if (sym === "USDT") return 1.0;
     if (sym === "UZS") return 1 / state.uzs;
     if (sym === "RUB") return 1 / state.rub;
     if (sym === "STARS") return state.stars_usd;
@@ -289,11 +338,7 @@ async function getVal(s) {
 }
 
 async function getExtras(usdVal, exclude = "") {
-    let exc = exclude.toUpperCase();
-    if (exc === "USD" || exc === "USDT") exc = "USD";
-    if (exc === "GRAM" || exc === "TON") exc = "GRAM";
-    if (exc === "GRAN" || exc === "SOMSA") exc = "GRAM";
-    
+    const exc = resolveSymbol(exclude);
 
     const tonD = await getPrice('TON');
     const lines = [];
@@ -347,7 +392,7 @@ bot.command(['rates', 'kurslar'], async (ctx) => {
         `${T(userId, 'rates_title')}\n\n` +
         `🇺🇿 1 USD = \`${fmt(state.uzs, 'UZS')}\` UZS\n` +
         `🇷🇺 1 USD = \`${fmt(state.rub, 'RUB')}\` RUB\n` +
-        `💎 GRAM/UZS = \`$${gram ? fmt(gram.price, 'USD') : '—'}\`  (24s: ${trendStr(trend24)} · 7k: ${trendStr(trend7d)})\n` +
+        `💎 GRAM/TON = \`$${gram ? fmt(gram.price, 'USD') : '—'}\`  (24s: ${trendStr(trend24)} · 7k: ${trendStr(trend7d)})\n` +
         `⭐ Stars = \`$${state.stars_usd}\`\n\n` +
         `🕐 ${T(userId, 'last_updated')}: ${state.last_updated || '—'}`;
 
@@ -360,21 +405,15 @@ bot.on('inline_query', async (ctx) => {
     if (!query) return;
 
     query = expandK(query);
+    query = normalizeSymbols(query);
 
     const match = query.match(/^([\d\s\+\-\*\/\(\)\.]+)\s+([a-z][a-z0-9]*)(?:\s+(?:to\s+)?([a-z][a-z0-9]*))?$/);
     if (!match) return;
 
     try {
         const expression = match[1].trim();
-        let fSym = match[2].toUpperCase();
-        let tSym = (match[3] || getUser(ctx.from.id).currency || "USD").toUpperCase();
-
-        if (fSym === "TON") fSym = "GRAM";
-        if (fSym === "USDT") fSym = "USD";
-        if (tSym === "TON") tSym = "GRAM";
-        if (tSym === "USDT") tSym = "USD";
-        if (tSym === "SOMSA") tSym = "GRAM";
-        
+        let fSym = resolveSymbol(match[2]);
+        let tSym = resolveSymbol(match[3] || getUser(ctx.from.id).currency || "USD");
 
         let amt = /[\+\-\*\/]/.test(expression) ? math.evaluate(expression) : parseFloat(expression);
         if (isNaN(amt)) return;
@@ -422,13 +461,9 @@ bot.command('alert', async (ctx) => {
     if (parts.length === 2) {
         targetPrice = parseFloat(parts[1]);
     } else if (parts.length >= 3) {
-        token = parts[1].toUpperCase();
+        token = resolveSymbol(parts[1]);
         targetPrice = parseFloat(parts[2]);
     }
-
-    if (token === "TON") token = "GRAM";
-    if (token === "USDT") token = "USD";
-     if (tSym === "SOMSA") tSym = "GRAM";
 
     if (isNaN(targetPrice)) return ctx.reply(T(userId, 'alert_bad_number'));
 
@@ -521,6 +556,44 @@ bot.action(/setlang_(uz|ru|en)/, (ctx) => {
     ctx.editMessageText(T(userId, 'language_set'), { parse_mode: 'Markdown' });
 });
 
+// --- /ADMIN: YANGI TAXALLUS QO'SHISH/O'CHIRISH ("somsa" kabi) ---
+bot.command('addalias', (ctx) => {
+    const userId = ctx.from.id;
+    if (!isAdmin(ctx)) return ctx.reply(T(userId, 'not_admin'));
+
+    const parts = ctx.message.text.split(' ');
+    if (parts.length < 3) return ctx.replyWithMarkdown(T(userId, 'alias_usage_add'));
+
+    const alias = parts[1].toLowerCase();
+    const target = parts[2].toLowerCase();
+
+    state.aliases[alias] = target;
+    ctx.replyWithMarkdown(T(userId, 'alias_added', alias, target.toUpperCase()));
+});
+
+bot.command('removealias', (ctx) => {
+    const userId = ctx.from.id;
+    if (!isAdmin(ctx)) return ctx.reply(T(userId, 'not_admin'));
+
+    const parts = ctx.message.text.split(' ');
+    if (parts.length < 2) return ctx.replyWithMarkdown(T(userId, 'alias_usage_remove'));
+
+    const alias = parts[1].toLowerCase();
+    if (!state.aliases[alias]) return ctx.reply(T(userId, 'alias_not_found'));
+
+    delete state.aliases[alias];
+    ctx.replyWithMarkdown(T(userId, 'alias_removed', alias));
+});
+
+bot.command(['aliases', 'taxalluslar'], (ctx) => {
+    const userId = ctx.from.id;
+    const entries = Object.entries(state.aliases);
+    if (entries.length === 0) return ctx.reply(T(userId, 'alias_list_empty'));
+
+    const list = entries.map(([a, t]) => `\`${a}\` → **${t.toUpperCase()}**`).join('\n');
+    ctx.replyWithMarkdown(`${T(userId, 'alias_list_title')}\n\n${list}`);
+});
+
 // --- 8. MATNLARNI QAYTA ISHLASH (MAIN HANDLER) ---
 async function handleConversion(ctx) {
     if (!ctx.message || !ctx.message.text || ctx.from?.is_bot) return;
@@ -528,16 +601,13 @@ async function handleConversion(ctx) {
     let text = ctx.message.text.toLowerCase().replace(/,/g, '.').trim();
 
     text = expandK(text);
-    text = text.replace(/\bton\b/g, 'gram');
-    text = text.replace(/\busdt\b/g, 'usd');
+    text = normalizeSymbols(text);
 
     // Premium hisob-kitobi
     const m_prem = text.match(/^(\d+)\s+premium(?:\s+([a-z]+))?$/);
     if (m_prem) {
         const m = parseInt(m_prem[1]);
-        let tSym = (m_prem[2] || getUser(ctx.from.id).currency || "USD").toUpperCase();
-        if (tSym === "USDT") tSym = "USD";
-        if (tSym === "TON") tSym = "GRAM";
+        let tSym = resolveSymbol(m_prem[2] || getUser(ctx.from.id).currency || "USD");
 
         if (state.premium[m]) {
             const usdVal = state.premium[m];
@@ -554,10 +624,7 @@ async function handleConversion(ctx) {
     const m_com = text.match(/^(\d+(?:\.\d+)?)\s+([a-z0-9]+)\s+com\s+(\d+(?:\.\d+)?)$/);
     if (m_com) {
         const amt = parseFloat(m_com[1]);
-        let sym = m_com[2].toUpperCase();
-        if (sym === "TON") sym = "GRAM";
-        if (sym === "USDT") sym = "USD";
-         if (tSym === "SOMSA") tSym = "GRAM";
+        let sym = resolveSymbol(m_com[2]);
 
         const prc = parseFloat(m_com[3]);
         const res = amt - (amt * prc / 100);
@@ -597,14 +664,8 @@ async function handleConversion(ctx) {
     if (m_pair) {
         try {
             const expression = m_pair[1].trim();
-            let fSym = m_pair[2].toUpperCase();
-            let tSym = (m_pair[3] || getUser(ctx.from.id).currency || "USD").toUpperCase();
-
-            if (fSym === "TON") fSym = "GRAM";
-            if (fSym === "USDT") fSym = "USD";
-            if (tSym === "TON") tSym = "GRAM";
-            if (tSym === "USDT") tSym = "USD";
-             if (tSym === "SOMSA") tSym = "GRAM";
+            let fSym = resolveSymbol(m_pair[2]);
+            let tSym = resolveSymbol(m_pair[3] || getUser(ctx.from.id).currency || "USD");
 
             let amt = /[\+\-\*\/]/.test(expression) ? math.evaluate(expression) : parseFloat(expression);
             if (isNaN(amt)) return;
