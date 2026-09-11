@@ -4,11 +4,17 @@ import * as math from 'mathjs';
 import * as cheerio from 'cheerio';
 import dotenv from 'dotenv';
 import express from 'express';
+import { MongoClient } from 'mongodb';
 
 dotenv.config();
 
 const API_TOKEN = process.env.API_TOKEN || "";
 const PORT = process.env.PORT || 5000;
+
+// MongoDB ulanish manzili (.env dagi MONGO_URI dan olinadi)
+const MONGO_URI = process.env.MONGO_URI || "";
+const mongoClient = new MongoClient(MONGO_URI);
+let stateCollection = null;
 
 // Adminlar ro'yxati (to'g'ridan-to'g'ri kodga yozilgan)
 const ADMIN_IDS = ["1228723117"];
@@ -29,8 +35,64 @@ const state = {
     alerts: [],
     priceHistory: { GRAM: [] },   // 24s/7k trend uchun narx tarixi
     users: {},                    // userId -> { lang, currency }
-    aliases: { 'ton': 'gram', 'somsa': 'gram' }   // taxallus -> asosiy belgi (admin tomonidan boshqariladi)
+    aliases: { 'ton': 'gram', 'somsa': 'gram' },   // taxallus -> asosiy belgi (admin tomonidan boshqariladi)
+    adminInfo: {}                 // admin qo'ygan matnlar (masalan karta raqami): key -> matn
 };
+
+// --- SAQLASH VA YUKLASH (MongoDB orqali, bot qayta ishga tushganda ma'lumotlar yo'qolmasligi uchun) ---
+async function connectMongo() {
+    if (!MONGO_URI) {
+        console.error("⚠️ MONGO_URI .env faylida topilmadi — ma'lumotlar saqlanmaydi.");
+        return;
+    }
+    try {
+        await mongoClient.connect();
+        const db = mongoClient.db(); // URI ichida ko'rsatilgan baza nomi ishlatiladi
+        stateCollection = db.collection('bot_state');
+        console.log("✅ MongoDB'ga ulanildi.");
+    } catch (e) {
+        console.error("⚠️ MongoDB'ga ulanishda xatolik:", e.message);
+    }
+}
+
+async function loadPersistedState() {
+    if (!stateCollection) return;
+    try {
+        const saved = await stateCollection.findOne({ _id: 'main' });
+        if (saved) {
+            if (saved.aliases) state.aliases = { ...state.aliases, ...saved.aliases };
+            if (saved.users) state.users = saved.users;
+            if (saved.adminInfo) state.adminInfo = saved.adminInfo;
+            if (saved.alerts) state.alerts = saved.alerts;
+            console.log("✅ MongoDB'dan saqlangan ma'lumotlar yuklandi.");
+        }
+    } catch (e) {
+        console.error("⚠️ MongoDB'dan o'qishda xatolik:", e.message);
+    }
+}
+
+async function savePersistedState() {
+    if (!stateCollection) return;
+    try {
+        await stateCollection.updateOne(
+            { _id: 'main' },
+            {
+                $set: {
+                    aliases: state.aliases,
+                    users: state.users,
+                    adminInfo: state.adminInfo,
+                    alerts: state.alerts
+                }
+            },
+            { upsert: true }
+        );
+    } catch (e) {
+        console.error("⚠️ MongoDB'ga yozishda xatolik:", e.message);
+    }
+}
+
+await connectMongo();
+await loadPersistedState();
 
 // Foydalanuvchi sozlamalarini olish (yo'q bo'lsa standart bilan yaratadi)
 function getUser(userId) {
@@ -54,7 +116,10 @@ const translations = {
             `📋 /rates — joriy kurslar\n` +
             `🔔 /myalerts — faol alertlaringiz\n` +
             `💱 /currency — standart valyuta\n` +
-            `🌐 /language — til tanlash`,
+            `🌐 /language — til tanlash\n` +
+            `💳 /card — to'lov kartasi (agar admin saqlagan bo'lsa)\n` +
+            `ℹ️ /info <kalit> — admin saqlagan boshqa ma'lumot\n` +
+            `🌍 /tr en Salom — matnni tarjima qilish (yoki xabarga reply: /tr en)`,
         rates_title: "📊 **Joriy kurslar**",
         last_updated: "Oxirgi yangilanish",
         no_alerts: "🔕 Sizda faol alertlar yo'q. Qo'shish uchun: `/alert gram 7.5`",
@@ -79,7 +144,18 @@ const translations = {
         alias_removed: (alias) => `🗑 **${alias}** taxallusi o'chirildi.`,
         alias_not_found: "⚠️ Bunday taxallus topilmadi.",
         alias_list_title: "📋 **Joriy taxalluslar:**",
-        alias_list_empty: "📋 Hozircha taxalluslar yo'q."
+        alias_list_empty: "📋 Hozircha taxalluslar yo'q.",
+        setinfo_usage: "⚠️ Format: `/setinfo card 9860 4535 3535 3535`\n(birinchi so'z — kalit nomi, qolgani — saqlanadigan matn)",
+        delinfo_usage: "⚠️ Format: `/delinfo card`",
+        info_usage: "⚠️ Format: `/info card`",
+        info_saved: (key) => `✅ **${key}** saqlandi.`,
+        info_deleted: (key) => `🗑 **${key}** o'chirildi.`,
+        info_not_found: "⚠️ Bunday ma'lumot topilmadi.",
+        info_list_title: "📋 **Saqlangan ma'lumotlar:**",
+        info_list_empty: "📋 Hozircha hech narsa saqlanmagan.",
+        card_title: "Karta raqami:",
+        tr_usage: "⚠️ Format: `/tr en Salom dunyo`\n(tarjima qilinadigan til kodi, so'ng matn)\n\nYoki biror xabarga **reply** qilib: `/tr ru`\n\nTil kodlari: `en`, `ru`, `uz`, `tr`, `ar`, `de`, `fr`, `es`, `zh` va h.k.",
+        tr_error: "⚠️ Tarjima qilib bo'lmadi. Birozdan so'ng qayta urinib ko'ring."
     },
     ru: {
         start: "👋 **Добро пожаловать в CoinSnap Bot!**\n\nСписок команд: /help",
@@ -95,7 +171,10 @@ const translations = {
             `📋 /rates — текущие курсы\n` +
             `🔔 /myalerts — ваши оповещения\n` +
             `💱 /currency — валюта по умолчанию\n` +
-            `🌐 /language — выбор языка`,
+            `🌐 /language — выбор языка\n` +
+            `💳 /card — платёжная карта (если добавлена админом)\n` +
+            `ℹ️ /info <ключ> — другая информация от админа\n` +
+            `🌍 /tr en Привет — перевод текста (или reply на сообщение: /tr en)`,
         rates_title: "📊 **Текущие курсы**",
         last_updated: "Последнее обновление",
         no_alerts: "🔕 У вас нет активных оповещений. Добавить: `/alert gram 7.5`",
@@ -120,7 +199,18 @@ const translations = {
         alias_removed: (alias) => `🗑 Псевдоним **${alias}** удалён.`,
         alias_not_found: "⚠️ Такой псевдоним не найден.",
         alias_list_title: "📋 **Текущие псевдонимы:**",
-        alias_list_empty: "📋 Псевдонимов пока нет."
+        alias_list_empty: "📋 Псевдонимов пока нет.",
+        setinfo_usage: "⚠️ Формат: `/setinfo card 9860 4535 3535 3535`\n(первое слово — имя ключа, остальное — сохраняемый текст)",
+        delinfo_usage: "⚠️ Формат: `/delinfo card`",
+        info_usage: "⚠️ Формат: `/info card`",
+        info_saved: (key) => `✅ **${key}** сохранено.`,
+        info_deleted: (key) => `🗑 **${key}** удалено.`,
+        info_not_found: "⚠️ Информация не найдена.",
+        info_list_title: "📋 **Сохранённая информация:**",
+        info_list_empty: "📋 Пока ничего не сохранено.",
+        card_title: "Номер карты:",
+        tr_usage: "⚠️ Формат: `/tr en Привет мир`\n(код языка перевода, затем текст)\n\nИли ответом (**reply**) на сообщение: `/tr ru`\n\nКоды языков: `en`, `ru`, `uz`, `tr`, `ar`, `de`, `fr`, `es`, `zh` и т.д.",
+        tr_error: "⚠️ Не удалось перевести. Попробуйте позже."
     },
     en: {
         start: "👋 **Welcome to CoinSnap Bot!**\n\nCommand list: /help",
@@ -136,7 +226,10 @@ const translations = {
             `📋 /rates — current rates\n` +
             `🔔 /myalerts — your alerts\n` +
             `💱 /currency — default currency\n` +
-            `🌐 /language — choose language`,
+            `🌐 /language — choose language\n` +
+            `💳 /card — payment card (if set by admin)\n` +
+            `ℹ️ /info <key> — other info set by admin\n` +
+            `🌍 /tr en Hello — translate text (or reply to a message: /tr en)`,
         rates_title: "📊 **Current rates**",
         last_updated: "Last updated",
         no_alerts: "🔕 You have no active alerts. Add one: `/alert gram 7.5`",
@@ -161,7 +254,18 @@ const translations = {
         alias_removed: (alias) => `🗑 Alias **${alias}** removed.`,
         alias_not_found: "⚠️ Alias not found.",
         alias_list_title: "📋 **Current aliases:**",
-        alias_list_empty: "📋 No aliases yet."
+        alias_list_empty: "📋 No aliases yet.",
+        setinfo_usage: "⚠️ Format: `/setinfo card 9860 4535 3535 3535`\n(first word — key name, rest — the text to save)",
+        delinfo_usage: "⚠️ Format: `/delinfo card`",
+        info_usage: "⚠️ Format: `/info card`",
+        info_saved: (key) => `✅ **${key}** saved.`,
+        info_deleted: (key) => `🗑 **${key}** deleted.`,
+        info_not_found: "⚠️ Info not found.",
+        info_list_title: "📋 **Saved info:**",
+        info_list_empty: "📋 Nothing saved yet.",
+        card_title: "Card number:",
+        tr_usage: "⚠️ Format: `/tr en Hello world`\n(target language code, then text)\n\nOr reply to a message with: `/tr ru`\n\nLanguage codes: `en`, `ru`, `uz`, `tr`, `ar`, `de`, `fr`, `es`, `zh`, etc.",
+        tr_error: "⚠️ Couldn't translate. Please try again shortly."
     }
 };
 
@@ -300,6 +404,19 @@ function expandK(text) {
     return text.replace(/(\d+(?:\.\d+)?)\s*k\b/g, (_, num) => {
         return (parseFloat(num) * 1000).toString();
     });
+}
+
+// --- MATN TARJIMASI (Google'ning bepul, kalitsiz endpointi orqali) ---
+async function translateText(text, targetLang) {
+    try {
+        const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${encodeURIComponent(targetLang)}&dt=t&q=${encodeURIComponent(text)}`;
+        const { data } = await axios.get(url, { timeout: 10000 });
+        const translated = data[0].map(chunk => chunk[0]).join('');
+        const detectedLang = data[2] || null;
+        return { translated, detectedLang };
+    } catch (e) {
+        return null;
+    }
 }
 
 // state.aliases dagi barcha taxalluslarni (masalan "somsa" -> "gram") va "usdt" ni matnda almashtiradi
@@ -481,6 +598,7 @@ bot.command('alert', async (ctx) => {
         targetPrice,
         direction
     });
+    savePersistedState();
 
     ctx.replyWithMarkdown(T(userId, 'alert_saved', token, targetPrice, direction));
 });
@@ -512,6 +630,7 @@ bot.action(/delalert_(.+)/, (ctx) => {
     }
 
     state.alerts.splice(idx, 1);
+    savePersistedState();
     ctx.answerCbQuery(T(userId, 'alert_deleted'));
     ctx.deleteMessage().catch(() => { });
 });
@@ -532,6 +651,7 @@ bot.action(/setcur_(.+)/, (ctx) => {
     const cur = ctx.match[1];
     const user = getUser(userId);
     user.currency = cur === 'NONE' ? null : cur;
+    savePersistedState();
 
     ctx.answerCbQuery();
     ctx.editMessageText(T(userId, 'currency_set', user.currency || 'USD'), { parse_mode: 'Markdown' });
@@ -552,6 +672,7 @@ bot.command(['language', 'til', 'язык'], (ctx) => {
 bot.action(/setlang_(uz|ru|en)/, (ctx) => {
     const userId = ctx.from.id;
     getUser(userId).lang = ctx.match[1];
+    savePersistedState();
     ctx.answerCbQuery();
     ctx.editMessageText(T(userId, 'language_set'), { parse_mode: 'Markdown' });
 });
@@ -568,6 +689,7 @@ bot.command('addalias', (ctx) => {
     const target = parts[2].toLowerCase();
 
     state.aliases[alias] = target;
+    savePersistedState();
     ctx.replyWithMarkdown(T(userId, 'alias_added', alias, target.toUpperCase()));
 });
 
@@ -582,6 +704,7 @@ bot.command('removealias', (ctx) => {
     if (!state.aliases[alias]) return ctx.reply(T(userId, 'alias_not_found'));
 
     delete state.aliases[alias];
+    savePersistedState();
     ctx.replyWithMarkdown(T(userId, 'alias_removed', alias));
 });
 
@@ -592,6 +715,141 @@ bot.command(['aliases', 'taxalluslar'], (ctx) => {
 
     const list = entries.map(([a, t]) => `\`${a}\` → **${t.toUpperCase()}**`).join('\n');
     ctx.replyWithMarkdown(`${T(userId, 'alias_list_title')}\n\n${list}`);
+});
+
+// --- /ADMIN: ISTALGAN MATN/RAQAM SAQLASH (masalan karta raqami) ---
+// /setinfo card 9860 4535 3535 3535  ->  keyingi qismning hammasi (bo'shliqlar bilan) matn sifatida saqlanadi
+bot.command('setinfo', (ctx) => {
+    const userId = ctx.from.id;
+    if (!isAdmin(ctx)) return ctx.reply(T(userId, 'not_admin'));
+
+    const text = ctx.message.text;
+    const parts = text.split(' ');
+    if (parts.length < 3) return ctx.replyWithMarkdown(T(userId, 'setinfo_usage'));
+
+    const key = parts[1].toLowerCase();
+    const value = parts.slice(2).join(' ').trim();
+
+    state.adminInfo[key] = value;
+    savePersistedState();
+    ctx.replyWithMarkdown(T(userId, 'info_saved', key));
+});
+
+bot.command('delinfo', (ctx) => {
+    const userId = ctx.from.id;
+    if (!isAdmin(ctx)) return ctx.reply(T(userId, 'not_admin'));
+
+    const parts = ctx.message.text.split(' ');
+    if (parts.length < 2) return ctx.replyWithMarkdown(T(userId, 'delinfo_usage'));
+
+    const key = parts[1].toLowerCase();
+    if (!state.adminInfo[key]) return ctx.reply(T(userId, 'info_not_found'));
+
+    delete state.adminInfo[key];
+    savePersistedState();
+    ctx.replyWithMarkdown(T(userId, 'info_deleted', key));
+});
+
+// Hammaga ochiq: /info card -> admin saqlagan matnni ko'rsatadi
+bot.command('info', (ctx) => {
+    const userId = ctx.from.id;
+    const parts = ctx.message.text.split(' ');
+    if (parts.length < 2) return ctx.replyWithMarkdown(T(userId, 'info_usage'));
+
+    const key = parts[1].toLowerCase();
+    const value = state.adminInfo[key];
+    if (!value) return ctx.reply(T(userId, 'info_not_found'));
+
+    ctx.replyWithMarkdown(`ℹ️ **${key}:**\n\`${value}\``);
+});
+
+// Qulaylik uchun tezkor buyruq: /card -> state.adminInfo['card']ni to'g'ridan-to'g'ri ko'rsatadi
+bot.command('card', (ctx) => {
+    const userId = ctx.from.id;
+    const value = state.adminInfo['card'];
+    if (!value) return ctx.reply(T(userId, 'info_not_found'));
+
+    ctx.replyWithMarkdown(`💳 ${T(userId, 'card_title')}\n\`${value}\``);
+});
+
+// Admin uchun: barcha saqlangan kalitlarni ko'rish
+bot.command('infolist', (ctx) => {
+    const userId = ctx.from.id;
+    if (!isAdmin(ctx)) return ctx.reply(T(userId, 'not_admin'));
+
+    const entries = Object.entries(state.adminInfo);
+    if (entries.length === 0) return ctx.reply(T(userId, 'info_list_empty'));
+
+    const list = entries.map(([k, v]) => `\`${k}\` → ${v}`).join('\n');
+    ctx.replyWithMarkdown(`${T(userId, 'info_list_title')}\n\n${list}`);
+});
+
+// --- /TR — MATNNI TARJIMA QILISH ---
+// Ishlatilishi: /tr en Salom dunyo   -> matnni inglizchaga tarjima qiladi
+// Yoki: biror xabarga reply qilib /tr ru  -> o'sha xabarni ruschaga tarjima qiladi
+bot.command('tr', async (ctx) => {
+    const userId = ctx.from.id;
+    const parts = ctx.message.text.split(' ');
+
+    if (parts.length < 2) {
+        return ctx.replyWithMarkdown(T(userId, 'tr_usage'));
+    }
+
+    const targetLang = parts[1].toLowerCase();
+    let textToTranslate = parts.slice(2).join(' ').trim();
+
+    // Agar matn berilmagan bo'lsa, reply qilingan xabar matnini olamiz
+    if (!textToTranslate && ctx.message.reply_to_message?.text) {
+        textToTranslate = ctx.message.reply_to_message.text;
+    }
+
+    if (!textToTranslate) {
+        return ctx.replyWithMarkdown(T(userId, 'tr_usage'));
+    }
+
+    const result = await translateText(textToTranslate, targetLang);
+    if (!result) {
+        return ctx.reply(T(userId, 'tr_error'));
+    }
+
+    ctx.reply(result.translated, {
+        reply_to_message_id: ctx.message.reply_to_message
+            ? ctx.message.reply_to_message.message_id
+            : ctx.message.message_id
+    });
+});
+// --- KANAL POSTLARINI AVTO-TARJIMA QILISH ---
+bot.on('message', async (ctx, next) => {
+    const msg = ctx.message;
+
+    // Faqat kanaldan avtomatik guruhga tushgan postlarni ushlaymiz
+    const isChannelPost = msg.is_automatic_forward || msg.sender_chat?.type === 'channel';
+
+    if (!isChannelPost) {
+        return next(); // Oddiy foydalanuvchi xabari bo'lsa, keyingi middleware'ga o'tadi
+    }
+
+    const textToTranslate = msg.text || msg.caption; // Matn yoki rasm ostidagi fel/caption
+    if (!textToTranslate) return;
+
+    // Tilni aniqlash va o'zbekcha bo'lmasa tarjima qilish
+    // Eslatma: translateText funktsiyangiz `sourceLang` yoki avto-tarjimani qo'llashi kerak
+    const result = await translateText(textToTranslate, 'uz');
+
+    // Agar matn allaqachon o'zbekcha bo'lsa yoki tarjima amalga oshmagan bo'lsa to'xtaymiz
+    if (!result || result.detectedLang === 'uz' || result.translated === textToTranslate) {
+        return;
+    }
+
+    // Tarjima qilingan matnni post ostiga reply qilib yuborish
+    try {
+        await ctx.reply(`🇺🇿 **O'zbekcha tarjimasi:**\n\n${result.translated}`, {
+            reply_to_message_id: msg.message_id,
+            parse_mode: 'Markdown'
+        });
+    } catch (err) {
+        console.error('Avto-tarjima yuborishda xatolik:', err);
+    }
 });
 
 // --- 8. MATNLARNI QAYTA ISHLASH (MAIN HANDLER) ---
