@@ -399,30 +399,43 @@ async function formatWalletInfo(userId, address, info) {
     const tonBalance = Number(info.balanceNano) / 1e9;
     const tonPriceData = await getPrice('TON');
     const tonUsd = tonPriceData ? tonBalance * tonPriceData.price : null;
+let text = `${intro}\n\n`;
 
-    let text = `${intro}\n\n`;
-    text += `\`${address}\`\n\n`;
-    text += `💎 **TON:** \`${tonBalance.toFixed(4)}\`${tonUsd ? ` (~$${tonUsd.toFixed(2)})` : ''}\n`;
+text += `💼 **Wallet**\n`;
+text += `┌ Address\n`;
+text += `└ \`${address}\`\n\n`;
 
-    const positiveJettons = (info.jettons || []).filter(j => Number(j.balance) > 0);
+text += `💎 **TON Balance**\n`;
+text += `└ \`${tonBalance.toFixed(4)} TON\`${tonUsd ? `  •  ≈ $${tonUsd.toFixed(2)}` : ''}\n`;
 
-    if (positiveJettons.length > 0) {
-        text += `\n${T(userId, 'wallet_assets_title')}\n`;
-        for (const j of positiveJettons.slice(0, 15)) {
-            const decimals = j.jetton?.decimals ?? 9;
-            const bal = Number(j.balance) / Math.pow(10, decimals);
-            const symbol = j.jetton?.symbol || '?';
-            text += `🔸 ${symbol}: \`${bal.toLocaleString('en-US', { maximumFractionDigits: 4 })}\`\n`;
-        }
-        if (positiveJettons.length > 15) {
-            text += `… va yana ${positiveJettons.length - 15} ta asest\n`;
-        }
-    } else {
-        text += `\n${T(userId, 'wallet_no_assets')}\n`;
+const positiveJettons = (info.jettons || []).filter(
+    j => Number(j.balance) > 0
+);
+
+if (positiveJettons.length > 0) {
+    text += `\n📦 **Assets**\n\n`;
+
+    for (const j of positiveJettons.slice(0, 15)) {
+        const decimals = j.jetton?.decimals ?? 9;
+        const bal = Number(j.balance) / Math.pow(10, decimals);
+        const symbol = j.jetton?.symbol || '?';
+
+        text += `🔹 **${symbol}**  \`${bal.toLocaleString('en-US', {
+            maximumFractionDigits: 4
+        })}\`\n`;
     }
 
-    text += `\n🔗 [TonViewer](https://tonviewer.com/${address})`;
-    return text;
+    if (positiveJettons.length > 15) {
+        text += `\n_… va yana ${positiveJettons.length - 15} ta asset_\n`;
+    }
+} else {
+    text += `\n📦 **Assets**\n`;
+    text += `└ ${T(userId, 'wallet_no_assets')}\n`;
+}
+
+text += `\n🔗 [View on TonViewer](https://tonviewer.com/${address})`;
+
+return text;
 }
 
 async function updateAllRates() {
