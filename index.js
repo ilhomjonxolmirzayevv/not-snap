@@ -13,7 +13,12 @@ const PORT = process.env.PORT || 5000;
 
 // MongoDB ulanish manzili (.env dagi MONGO_URI dan olinadi)
 const MONGO_URI = process.env.MONGO_URI || "";
-const mongoClient = new MongoClient(MONGO_URI);
+// MUHIM: agar MONGO_URI bo'sh bo'lsa, MongoClient yaratmaymiz — aks holda ba'zi
+// versiyalarda bo'sh/notog'ri URI bilan MongoClient(...) darhol xatolik (throw)
+// berib, butun botni ishga tushishidan to'sqinlik qilishi mumkin.
+const mongoClient = MONGO_URI
+    ? new MongoClient(MONGO_URI, { serverSelectionTimeoutMS: 8000 })
+    : null;
 let stateCollection = null;
 
 // Adminlar ro'yxati (to'g'ridan-to'g'ri kodga yozilgan)
@@ -36,22 +41,42 @@ const state = {
     priceHistory: { GRAM: [] },   // 24s/7k trend uchun narx tarixi
     users: {},                    // userId -> { lang, currency }
     aliases: { 'ton': 'gram', 'somsa': 'gram' },   // taxallus -> asosiy belgi (admin tomonidan boshqariladi)
-    adminInfo: {}                 // admin qo'ygan matnlar (masalan karta raqami): key -> matn
+    adminInfo: {},                 // admin qo'ygan matnlar (masalan karta raqami): key -> matn
+    wallets: {},                   // userId -> TON hamyon manzili
+    pendingWallet: {}              // userId -> true (hamyon manzili kutilmoqda)
 };
 
 // --- SAQLASH VA YUKLASH (MongoDB orqali, bot qayta ishga tushganda ma'lumotlar yo'qolmasligi uchun) ---
 async function connectMongo() {
-    if (!MONGO_URI) {
-        console.error("⚠️ MONGO_URI .env faylida topilmadi — ma'lumotlar saqlanmaydi.");
+    if (!MONGO_URI || !mongoClient) {
+        console.error(
+            "⚠️ MONGO_URI topilmadi!\n" +
+            "   Agar botni Render'da ishlatayotgan bo'lsangiz: .env fayli Render'ga yuklanmaydi —\n" +
+            "   MONGO_URI qiymatini Render Dashboard → sizning servisingiz → Environment →\n" +
+            "   Environment Variables bo'limiga qo'lda qo'shishingiz kerak.\n" +
+            "   Hozircha bot ishlaydi, lekin hech narsa saqlanmaydi/yuklanmaydi."
+        );
         return;
     }
     try {
         await mongoClient.connect();
         const db = mongoClient.db(); // URI ichida ko'rsatilgan baza nomi ishlatiladi
         stateCollection = db.collection('bot_state');
-        console.log("✅ MongoDB'ga ulanildi.");
+        console.log(`✅ MongoDB'ga ulanildi. Baza nomi: "${db.databaseName}"`);
+        if (!db.databaseName || db.databaseName === "test") {
+            console.warn(
+                "⚠️ Diqqat: baza nomi aniqlanmadi yoki standart \"test\" bazasi ishlatilmoqda.\n" +
+                "   MONGO_URI oxirida baza nomini ko'rsating, masalan:\n" +
+                "   mongodb+srv://user:pass@cluster.mongodb.net/coinsnap?retryWrites=true&w=majority"
+            );
+        }
     } catch (e) {
         console.error("⚠️ MongoDB'ga ulanishda xatolik:", e.message);
+        console.error(
+            "   Tekshiring: 1) MONGO_URI to'g'ri va to'liq ekanini (foydalanuvchi nomi/parol/baza nomi);\n" +
+            "   2) MongoDB Atlas'da Network Access bo'limida 0.0.0.0/0 (yoki Render IP'lari) ruxsat berilganini;\n" +
+            "   3) Atlas foydalanuvchisi shu bazaga o'qish/yozish huquqiga ega ekanini."
+        );
     }
 }
 
@@ -64,7 +89,11 @@ async function loadPersistedState() {
             if (saved.users) state.users = saved.users;
             if (saved.adminInfo) state.adminInfo = saved.adminInfo;
             if (saved.alerts) state.alerts = saved.alerts;
+            if (saved.wallets) state.wallets = saved.wallets;
+            if (saved.pendingWallet) state.pendingWallet = saved.pendingWallet;
             console.log("✅ MongoDB'dan saqlangan ma'lumotlar yuklandi.");
+        } else {
+            console.log("ℹ️ MongoDB'da hali saqlangan hujjat yo'q (birinchi marta ishga tushmoqda bo'lishi mumkin).");
         }
     } catch (e) {
         console.error("⚠️ MongoDB'dan o'qishda xatolik:", e.message);
@@ -81,7 +110,9 @@ async function savePersistedState() {
                     aliases: state.aliases,
                     users: state.users,
                     adminInfo: state.adminInfo,
-                    alerts: state.alerts
+                    alerts: state.alerts,
+                    wallets: state.wallets,
+                    pendingWallet: state.pendingWallet
                 }
             },
             { upsert: true }
@@ -117,6 +148,7 @@ const translations = {
             `🔔 /myalerts — faol alertlaringiz\n` +
             `💱 /currency — standart valyuta\n` +
             `🌐 /language — til tanlash\n` +
+            `💼 /mywallet — TON hamyoningizni qo'shish/ko'rish\n` +
             `💳 /card — to'lov kartasi (agar admin saqlagan bo'lsa)\n` +
             `ℹ️ /info <kalit> — admin saqlagan boshqa ma'lumot\n` +
             `🌍 /tr en Salom — matnni tarjima qilish (yoki xabarga reply: /tr en)`,
@@ -155,7 +187,14 @@ const translations = {
         info_list_empty: "📋 Hozircha hech narsa saqlanmagan.",
         card_title: "Karta raqami:",
         tr_usage: "⚠️ Format: `/tr en Salom dunyo`\n(tarjima qilinadigan til kodi, so'ng matn)\n\nYoki biror xabarga **reply** qilib: `/tr ru`\n\nTil kodlari: `en`, `ru`, `uz`, `tr`, `ar`, `de`, `fr`, `es`, `zh` va h.k.",
-        tr_error: "⚠️ Tarjima qilib bo'lmadi. Birozdan so'ng qayta urinib ko'ring."
+        tr_error: "⚠️ Tarjima qilib bo'lmadi. Birozdan so'ng qayta urinib ko'ring.",
+        wallet_ask: "💼 Sizda hali TON hamyon qo'shilmagan.\n\nHamyon manzilingizni **shu xabarga reply qilib** yuboring 👇",
+        wallet_saved: (addr) => `✅ Hamyon saqlandi!\n\`${addr}\`\n\nEndi \`/mywallet\` deb yozib balansingizni istalgan vaqtda ko'rishingiz mumkin.`,
+        wallet_invalid: "⚠️ Bu TON hamyon manziliga o'xshamayapti. Iltimos, to'g'ri manzil yuboring (masalan: `EQAbc...` yoki `UQAbc...`).",
+        wallet_loading: "🔎 Hamyoningiz tekshirilmoqda...",
+        wallet_error: "⚠️ Hamyon ma'lumotlarini olib bo'lmadi. Birozdan so'ng qayta urinib ko'ring.",
+        wallet_assets_title: "🪙 **Boshqa asetlar:**",
+        wallet_no_assets: "📭 Boshqa asetlar (jetton) topilmadi."
     },
     ru: {
         start: "👋 **Добро пожаловать в CoinSnap Bot!**\n\nСписок команд: /help",
@@ -172,6 +211,7 @@ const translations = {
             `🔔 /myalerts — ваши оповещения\n` +
             `💱 /currency — валюта по умолчанию\n` +
             `🌐 /language — выбор языка\n` +
+            `💼 /mywallet — добавить/посмотреть свой TON-кошелёк\n` +
             `💳 /card — платёжная карта (если добавлена админом)\n` +
             `ℹ️ /info <ключ> — другая информация от админа\n` +
             `🌍 /tr en Привет — перевод текста (или reply на сообщение: /tr en)`,
@@ -210,7 +250,14 @@ const translations = {
         info_list_empty: "📋 Пока ничего не сохранено.",
         card_title: "Номер карты:",
         tr_usage: "⚠️ Формат: `/tr en Привет мир`\n(код языка перевода, затем текст)\n\nИли ответом (**reply**) на сообщение: `/tr ru`\n\nКоды языков: `en`, `ru`, `uz`, `tr`, `ar`, `de`, `fr`, `es`, `zh` и т.д.",
-        tr_error: "⚠️ Не удалось перевести. Попробуйте позже."
+        tr_error: "⚠️ Не удалось перевести. Попробуйте позже.",
+        wallet_ask: "💼 У вас ещё не добавлен TON-кошелёк.\n\nОтправьте адрес кошелька **ответом (reply) на это сообщение** 👇",
+        wallet_saved: (addr) => `✅ Кошелёк сохранён!\n\`${addr}\`\n\nТеперь можете в любой момент написать \`/mywallet\`, чтобы увидеть баланс.`,
+        wallet_invalid: "⚠️ Это не похоже на TON-адрес. Пожалуйста, отправьте корректный адрес (например: `EQAbc...` или `UQAbc...`).",
+        wallet_loading: "🔎 Проверяем ваш кошелёк...",
+        wallet_error: "⚠️ Не удалось получить данные кошелька. Попробуйте позже.",
+        wallet_assets_title: "🪙 **Другие активы:**",
+        wallet_no_assets: "📭 Других активов (жетонов) не найдено."
     },
     en: {
         start: "👋 **Welcome to CoinSnap Bot!**\n\nCommand list: /help",
@@ -227,6 +274,7 @@ const translations = {
             `🔔 /myalerts — your alerts\n` +
             `💱 /currency — default currency\n` +
             `🌐 /language — choose language\n` +
+            `💼 /mywallet — add/view your TON wallet\n` +
             `💳 /card — payment card (if set by admin)\n` +
             `ℹ️ /info <key> — other info set by admin\n` +
             `🌍 /tr en Hello — translate text (or reply to a message: /tr en)`,
@@ -265,7 +313,14 @@ const translations = {
         info_list_empty: "📋 Nothing saved yet.",
         card_title: "Card number:",
         tr_usage: "⚠️ Format: `/tr en Hello world`\n(target language code, then text)\n\nOr reply to a message with: `/tr ru`\n\nLanguage codes: `en`, `ru`, `uz`, `tr`, `ar`, `de`, `fr`, `es`, `zh`, etc.",
-        tr_error: "⚠️ Couldn't translate. Please try again shortly."
+        tr_error: "⚠️ Couldn't translate. Please try again shortly.",
+        wallet_ask: "💼 You haven't added a TON wallet yet.\n\nSend your wallet address **as a reply to this message** 👇",
+        wallet_saved: (addr) => `✅ Wallet saved!\n\`${addr}\`\n\nType \`/mywallet\` any time to check your balance.`,
+        wallet_invalid: "⚠️ That doesn't look like a TON address. Please send a valid one (e.g. `EQAbc...` or `UQAbc...`).",
+        wallet_loading: "🔎 Checking your wallet...",
+        wallet_error: "⚠️ Couldn't fetch wallet data. Please try again shortly.",
+        wallet_assets_title: "🪙 **Other assets:**",
+        wallet_no_assets: "📭 No other assets (jettons) found."
     }
 };
 
@@ -307,7 +362,68 @@ async function getPrice(symbol) {
     } catch (e) { return null; }
 }
 
+// --- 2b. TON HAMYON MA'LUMOTLARI (TonAPI — TonViewer shu ma'lumotlar bazasidan foydalanadi) ---
+function isValidTonAddress(addr) {
+    if (!addr) return false;
+    const raw = /^-?\d:[0-9a-fA-F]{64}$/;         // masalan: 0:83dfd552e6...
+    const friendly = /^[A-Za-z0-9_-]{48}$/;       // masalan: EQAbc... yoki UQAbc...
+    return raw.test(addr) || friendly.test(addr);
+}
 
+async function getWalletInfo(address) {
+    const [accRes, jettonsRes] = await Promise.all([
+        axios.get(`https://tonapi.io/v2/accounts/${encodeURIComponent(address)}`, { timeout: 10000 }),
+        axios.get(`https://tonapi.io/v2/accounts/${encodeURIComponent(address)}/jettons`, { timeout: 10000 })
+            .catch(() => ({ data: { balances: [] } }))
+    ]);
+
+    return {
+        rawAddress: accRes.data.address,
+        balanceNano: accRes.data.balance,
+        isSuspended: accRes.data.is_suspended || false,
+        jettons: jettonsRes.data.balances || []
+    };
+}
+
+const WALLET_INTROS = {
+    uz: ["🚀 Hamyoningiz mana bunday ko'rinadi:", "✨ Xazinangizni ko'rib chiqdik:", "🎉 Hamyon tekshiruvi tayyor:", "🧭 Mana natija:"],
+    ru: ["🚀 Вот как выглядит ваш кошелёк:", "✨ Мы заглянули в ваши сокровища:", "🎉 Проверка кошелька готова:", "🧭 Вот результат:"],
+    en: ["🚀 Here's what your wallet looks like:", "✨ We peeked into your treasure chest:", "🎉 Wallet check complete:", "🧭 Here's the result:"]
+};
+
+async function formatWalletInfo(userId, address, info) {
+    const lang = getUser(userId).lang;
+    const introList = WALLET_INTROS[lang] || WALLET_INTROS.uz;
+    const intro = introList[Math.floor(Math.random() * introList.length)];
+
+    const tonBalance = Number(info.balanceNano) / 1e9;
+    const tonPriceData = await getPrice('TON');
+    const tonUsd = tonPriceData ? tonBalance * tonPriceData.price : null;
+
+    let text = `${intro}\n\n`;
+    text += `\`${address}\`\n\n`;
+    text += `💎 **TON:** \`${tonBalance.toFixed(4)}\`${tonUsd ? ` (~$${tonUsd.toFixed(2)})` : ''}\n`;
+
+    const positiveJettons = (info.jettons || []).filter(j => Number(j.balance) > 0);
+
+    if (positiveJettons.length > 0) {
+        text += `\n${T(userId, 'wallet_assets_title')}\n`;
+        for (const j of positiveJettons.slice(0, 15)) {
+            const decimals = j.jetton?.decimals ?? 9;
+            const bal = Number(j.balance) / Math.pow(10, decimals);
+            const symbol = j.jetton?.symbol || '?';
+            text += `🔸 ${symbol}: \`${bal.toLocaleString('en-US', { maximumFractionDigits: 4 })}\`\n`;
+        }
+        if (positiveJettons.length > 15) {
+            text += `… va yana ${positiveJettons.length - 15} ta asest\n`;
+        }
+    } else {
+        text += `\n${T(userId, 'wallet_no_assets')}\n`;
+    }
+
+    text += `\n🔗 [TonViewer](https://tonviewer.com/${address})`;
+    return text;
+}
 
 async function updateAllRates() {
     console.log("Kurslar yangilanmoqda...");
@@ -675,6 +791,58 @@ bot.action(/setlang_(uz|ru|en)/, (ctx) => {
     savePersistedState();
     ctx.answerCbQuery();
     ctx.editMessageText(T(userId, 'language_set'), { parse_mode: 'Markdown' });
+});
+
+// --- /MYWALLET — TON HAMYONNI QO'SHISH / KO'RISH ---
+bot.command(['mywallet', 'hamyonim'], async (ctx) => {
+    const userId = ctx.from.id;
+    const wallet = state.wallets[userId];
+
+    if (!wallet) {
+        state.pendingWallet[userId] = true;
+        savePersistedState();
+        return ctx.replyWithMarkdown(T(userId, 'wallet_ask'));
+    }
+
+    const loadingMsg = await ctx.replyWithMarkdown(T(userId, 'wallet_loading'));
+    try {
+        const info = await getWalletInfo(wallet);
+        const text = await formatWalletInfo(userId, wallet, info);
+        await ctx.telegram.editMessageText(ctx.chat.id, loadingMsg.message_id, undefined, text, {
+            parse_mode: 'Markdown',
+            disable_web_page_preview: true
+        });
+    } catch (e) {
+        console.error('Hamyon ma\'lumotini olishda xatolik:', e.message);
+        await ctx.telegram.editMessageText(ctx.chat.id, loadingMsg.message_id, undefined, T(userId, 'wallet_error'), {
+            parse_mode: 'Markdown'
+        }).catch(() => { });
+    }
+});
+
+// Foydalanuvchi /mywallet bosgan bot xabariga hamyon manzilini reply qilib yuborsa, shu yerda ushlanadi
+bot.on('text', async (ctx, next) => {
+    const userId = ctx.from.id;
+    const isReplyToBot = ctx.message.reply_to_message?.from?.id === ctx.botInfo?.id;
+
+    if (state.pendingWallet[userId] && isReplyToBot) {
+        const addr = ctx.message.text.trim();
+
+        if (isValidTonAddress(addr)) {
+            state.wallets[userId] = addr;
+            delete state.pendingWallet[userId];
+            savePersistedState();
+            return ctx.replyWithMarkdown(T(userId, 'wallet_saved', addr), {
+                reply_to_message_id: ctx.message.message_id
+            });
+        }
+
+        return ctx.replyWithMarkdown(T(userId, 'wallet_invalid'), {
+            reply_to_message_id: ctx.message.message_id
+        });
+    }
+
+    return next();
 });
 
 // --- /ADMIN: YANGI TAXALLUS QO'SHISH/O'CHIRISH ("somsa" kabi) ---
