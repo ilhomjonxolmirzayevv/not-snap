@@ -5,11 +5,46 @@ import * as cheerio from 'cheerio';
 import dotenv from 'dotenv';
 import express from 'express';
 import { MongoClient } from 'mongodb';
+import { createCanvas } from '@napi-rs/canvas';
 
 dotenv.config();
 
+// Eng tashqi himoya qatlami: bot.catch() faqat Telegraf'ning o'z yangilik
+// qayta ishlash zanjiridagi xatoliklarni ushlaydi. Lekin setInterval orqali
+// ishlaydigan kurs yangilanishi kabi joylarda chiqqan ushlanmagan xatolik ham
+// xuddi shunday butun Node jarayonini qulatib qo'yishi mumkin edi. Shu sabab
+// bunday xatoliklarni ham shu yerda ushlab, faqat konsolga yozamiz.
+process.on('unhandledRejection', (reason) => {
+    console.error('⚠️ Ushlanmagan Promise xatoligi:', reason);
+});
+process.on('uncaughtException', (err) => {
+    console.error('⚠️ Ushlanmagan xatolik:', err);
+});
+
 const API_TOKEN = process.env.API_TOKEN || "";
 const PORT = process.env.PORT || 5000;
+// Inline rejimdagi svop-kartochka rasmi uchun ochiq (public) manzil kerak — Telegram
+// serverlari shu URL orqali rasmni yuklab oladi. Render buni RENDER_EXTERNAL_URL
+// nomli environment variable orqali avtomatik beradi. Agar Render'dan boshqa joyda
+// (masalan lokal kompyuterda) ishlatilsa, PUBLIC_BASE_URL'ni .env'da qo'lda ko'rsating
+// (masalan https://sizning-domeningiz.com), aks holda inline svop-rasmlari ko'rinmaydi.
+const PUBLIC_BASE_URL = (process.env.RENDER_EXTERNAL_URL || process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
+if (!process.env.RENDER_EXTERNAL_URL && !process.env.PUBLIC_BASE_URL) {
+    console.log("ℹ️ PUBLIC_BASE_URL/RENDER_EXTERNAL_URL sozlanmagan — inline svop-rasmlari faqat serverning o'zi ochiq manzilga ega bo'lsagina ko'rinadi.");
+}
+
+// Yandex Cloud Translate (.env: YANDEX_API_KEY, YANDEX_FOLDER_ID).
+// Olish yo'li: https://yandex.cloud -> Cloud konsoliga kiring (bepul/trial
+// billing hisob ham yetarli) -> "Folder ID" ni nusxalang (YANDEX_FOLDER_ID) ->
+// "Service accounts" bo'limida yangi xizmat hisobi yarating, unga
+// "ai.translate.user" rolini bering -> shu hisob uchun API-kalit yarating
+// (YANDEX_API_KEY). Sozlanmasa, tarjima faqat Google'ning zaxira usuli
+// (translate.googleapis.com) orqali ishlaydi.
+const YANDEX_API_KEY = process.env.YANDEX_API_KEY || "";
+const YANDEX_FOLDER_ID = process.env.YANDEX_FOLDER_ID || "";
+if (!YANDEX_API_KEY || !YANDEX_FOLDER_ID) {
+    console.log("ℹ️ YANDEX_API_KEY/YANDEX_FOLDER_ID sozlanmagan — tarjima faqat Google'ning zaxira usuli orqali ishlaydi.");
+}
 
 // MongoDB ulanish manzili (.env dagi MONGO_URI dan olinadi)
 const MONGO_URI = process.env.MONGO_URI || "";
@@ -30,6 +65,15 @@ function isAdmin(ctx) {
 
 const bot = new Telegraf(API_TOKEN);
 
+// MUHIM: bu bo'lmasa, ISTALGAN bitta xabarni yuborishda chiqqan xatolik
+// (masalan noto'g'ri Markdown, Telegram API xatoligi, tarmoq muammosi)
+// butun bot jarayonini qulatib qo'yadi va u BARCHA foydalanuvchilar uchun
+// to'xtab qoladi (qayta ishga tushirilguncha). Shu sabab har qanday
+// ushlanmagan xatolikni shu yerda ushlab, faqat konsolga yozamiz.
+bot.catch((err, ctx) => {
+    console.error(`⚠️ Botda ushlanmagan xatolik (update ${ctx.update?.update_id}):`, err);
+});
+
 // Keshlar va sozlamalar uchun in-memory xotira
 const state = {
     uzs: 12850.0,
@@ -43,7 +87,8 @@ const state = {
     aliases: { 'ton': 'gram', 'somsa': 'gram' },   // taxallus -> asosiy belgi (admin tomonidan boshqariladi)
     adminInfo: {},                 // admin qo'ygan matnlar (masalan karta raqami): key -> matn
     wallets: {},                   // userId -> TON hamyon manzili
-    pendingWallet: {}              // userId -> true (hamyon manzili kutilmoqda)
+    pendingWallet: {},             // userId -> true (hamyon manzili kutilmoqda)
+    autoTranslateLang: 'uz'        // kanal postlari avtomatik shu tilga tarjima qilinadi (/tr st <til> orqali o'zgartiriladi)
 };
 
 // --- SAQLASH VA YUKLASH (MongoDB orqali, bot qayta ishga tushganda ma'lumotlar yo'qolmasligi uchun) ---
@@ -91,6 +136,7 @@ async function loadPersistedState() {
             if (saved.alerts) state.alerts = saved.alerts;
             if (saved.wallets) state.wallets = saved.wallets;
             if (saved.pendingWallet) state.pendingWallet = saved.pendingWallet;
+            if (saved.autoTranslateLang) state.autoTranslateLang = saved.autoTranslateLang;
             console.log("✅ MongoDB'dan saqlangan ma'lumotlar yuklandi.");
         } else {
             console.log("ℹ️ MongoDB'da hali saqlangan hujjat yo'q (birinchi marta ishga tushmoqda bo'lishi mumkin).");
@@ -112,7 +158,8 @@ async function savePersistedState() {
                     adminInfo: state.adminInfo,
                     alerts: state.alerts,
                     wallets: state.wallets,
-                    pendingWallet: state.pendingWallet
+                    pendingWallet: state.pendingWallet,
+                    autoTranslateLang: state.autoTranslateLang
                 }
             },
             { upsert: true }
@@ -148,9 +195,7 @@ const translations = {
             `🔔 /myalerts — faol alertlaringiz\n` +
             `💱 /currency — standart valyuta\n` +
             `🌐 /language — til tanlash\n` +
-            `💼 /mywallet — TON hamyoningizni qo'shish/ko'rish\n` +
-            `💳 /card — to'lov kartasi (agar admin saqlagan bo'lsa)\n` +
-            `ℹ️ /info <kalit> — admin saqlagan boshqa ma'lumot\n` +
+            `💼 /mywallet — TON hamyoningizni qo'shish/ko'rish\n` + 
             `🌍 /tr en Salom — matnni tarjima qilish (yoki xabarga reply: /tr en)`,
         rates_title: "📊 **Joriy kurslar**",
         last_updated: "Oxirgi yangilanish",
@@ -194,7 +239,16 @@ const translations = {
         wallet_loading: "🔎 Hamyoningiz tekshirilmoqda...",
         wallet_error: "⚠️ Hamyon ma'lumotlarini olib bo'lmadi. Birozdan so'ng qayta urinib ko'ring.",
         wallet_assets_title: "🪙 **Boshqa asetlar:**",
-        wallet_no_assets: "📭 Boshqa asetlar (jetton) topilmadi."
+        wallet_no_assets: "📭 Boshqa asetlar (jetton) topilmadi.",
+        wallet_change_btn: "🔄 Hamyonni o'zgartirish",
+        wallet_hide_balance_btn: "🙈 Balansni yashirish",
+        wallet_show_balance_btn: "👁 Balansni ko'rsatish",
+        wallet_showall_btn: "🔎 Barcha asetlarni ko'rish",
+        wallet_lookup_no_reply: "⚠️ Bu buyruqni kimningdir xabariga **reply** qilib yuboring — shunda o'sha odamning hamyoni ko'rsatiladi.",
+        wallet_lookup_not_found: "⚠️ Bu foydalanuvchi hali TON hamyon qo'shmagan.",
+        wallet_lookup_result: (name, addr) => `💼 **${name}**ning hamyoni:\n\`${addr}\``,
+        tr_set_usage: "⚠️ Format: `/tr st uz`\n(kanaldan tushgan postlar avtomatik tarjima qilinadigan standart tilni belgilaydi)",
+        tr_set_saved: (lang) => `✅ Kanal postlari uchun standart tarjima tili endi: **${lang}**`
     },
     ru: {
         start: "👋 **Добро пожаловать в CoinSnap Bot!**\n\nСписок команд: /help",
@@ -257,7 +311,16 @@ const translations = {
         wallet_loading: "🔎 Проверяем ваш кошелёк...",
         wallet_error: "⚠️ Не удалось получить данные кошелька. Попробуйте позже.",
         wallet_assets_title: "🪙 **Другие активы:**",
-        wallet_no_assets: "📭 Других активов (жетонов) не найдено."
+        wallet_no_assets: "📭 Других активов (жетонов) не найдено.",
+        wallet_change_btn: "🔄 Изменить кошелёк",
+        wallet_hide_balance_btn: "🙈 Скрыть баланс",
+        wallet_show_balance_btn: "👁 Показать баланс",
+        wallet_showall_btn: "🔎 Показать все активы",
+        wallet_lookup_no_reply: "⚠️ Отправьте эту команду **ответом (reply)** на чьё-то сообщение — тогда покажется кошелёк этого человека.",
+        wallet_lookup_not_found: "⚠️ Этот пользователь ещё не добавил TON-кошелёк.",
+        wallet_lookup_result: (name, addr) => `💼 Кошелёк **${name}**:\n\`${addr}\``,
+        tr_set_usage: "⚠️ Формат: `/tr st uz`\n(задаёт язык, на который автоматически переводятся посты из канала)",
+        tr_set_saved: (lang) => `✅ Язык автоперевода постов канала теперь: **${lang}**`
     },
     en: {
         start: "👋 **Welcome to CoinSnap Bot!**\n\nCommand list: /help",
@@ -320,7 +383,16 @@ const translations = {
         wallet_loading: "🔎 Checking your wallet...",
         wallet_error: "⚠️ Couldn't fetch wallet data. Please try again shortly.",
         wallet_assets_title: "🪙 **Other assets:**",
-        wallet_no_assets: "📭 No other assets (jettons) found."
+        wallet_no_assets: "📭 No other assets (jettons) found.",
+        wallet_change_btn: "🔄 Change wallet",
+        wallet_hide_balance_btn: "🙈 Hide balance",
+        wallet_show_balance_btn: "👁 Show balance",
+        wallet_showall_btn: "🔎 Show all assets",
+        wallet_lookup_no_reply: "⚠️ Send this command as a **reply** to someone's message — that person's wallet will then be shown.",
+        wallet_lookup_not_found: "⚠️ This user hasn't added a TON wallet yet.",
+        wallet_lookup_result: (name, addr) => `💼 **${name}**'s wallet:\n\`${addr}\``,
+        tr_set_usage: "⚠️ Format: `/tr st uz`\n(sets the default language incoming channel posts get auto-translated into)",
+        tr_set_saved: (lang) => `✅ Default channel auto-translate language is now: **${lang}**`
     }
 };
 
@@ -373,7 +445,7 @@ function isValidTonAddress(addr) {
 async function getWalletInfo(address) {
     const [accRes, jettonsRes] = await Promise.all([
         axios.get(`https://tonapi.io/v2/accounts/${encodeURIComponent(address)}`, { timeout: 10000 }),
-        axios.get(`https://tonapi.io/v2/accounts/${encodeURIComponent(address)}/jettons`, { timeout: 10000 })
+        axios.get(`https://tonapi.io/v2/accounts/${encodeURIComponent(address)}/jettons?currencies=usd`, { timeout: 10000 })
             .catch(() => ({ data: { balances: [] } }))
     ]);
 
@@ -385,13 +457,26 @@ async function getWalletInfo(address) {
     };
 }
 
+// TonAPI javobidagi turli mumkin bo'lgan joylardan jetton narxini (USD) topishga urinadi.
+// Topilmasa null qaytaradi (chiqishda shunchaki USD qiymati ko'rsatilmaydi, xatolik bermaydi).
+function getJettonUsdPrice(j) {
+    const raw = j.price?.prices?.USD ?? j.price?.prices?.usd ?? null;
+    const num = raw != null ? Number(raw) : NaN;
+    return isNaN(num) ? null : num;
+}
+
 const WALLET_INTROS = {
     uz: ["🚀 Hamyoningiz mana bunday ko'rinadi:", "✨ Xazinangizni ko'rib chiqdik:", "🎉 Hamyon tekshiruvi tayyor:", "🧭 Mana natija:"],
     ru: ["🚀 Вот как выглядит ваш кошелёк:", "✨ Мы заглянули в ваши сокровища:", "🎉 Проверка кошелька готова:", "🧭 Вот результат:"],
     en: ["🚀 Here's what your wallet looks like:", "✨ We peeked into your treasure chest:", "🎉 Wallet check complete:", "🧭 Here's the result:"]
 };
 
-async function formatWalletInfo(userId, address, info) {
+const WALLET_JETTONS_PREVIEW_COUNT = 3;
+const MASK = '••••••';
+
+// hidden — TON/jetton miqdorlarini "••••••" bilan yashiradi
+// showAll — true bo'lsa, barcha jettonlarni ko'rsatadi; aks holda faqat dastlabki 3 tasini
+async function formatWalletInfo(userId, address, info, hidden = false, showAll = false) {
     const lang = getUser(userId).lang;
     const introList = WALLET_INTROS[lang] || WALLET_INTROS.uz;
     const intro = introList[Math.floor(Math.random() * introList.length)];
@@ -399,43 +484,60 @@ async function formatWalletInfo(userId, address, info) {
     const tonBalance = Number(info.balanceNano) / 1e9;
     const tonPriceData = await getPrice('TON');
     const tonUsd = tonPriceData ? tonBalance * tonPriceData.price : null;
-let text = `${intro}\n\n`;
 
-text += `💼 **Wallet**\n`;
-text += `┌ Address\n`;
-text += `└ \`${address}\`\n\n`;
+    let text = `${intro}\n\n`;
+    text += `\`${address}\`\n\n`;
 
-text += `💎 **TON Balance**\n`;
-text += `└ \`${tonBalance.toFixed(4)} TON\`${tonUsd ? `  •  ≈ $${tonUsd.toFixed(2)}` : ''}\n`;
+    const tonBalStr = hidden ? MASK : tonBalance.toFixed(4);
+    const tonUsdStr = hidden ? MASK : (tonUsd ? `~$${tonUsd.toFixed(2)}` : null);
+    text += `💎 **TON:** \`${tonBalStr}\`${tonUsdStr ? ` (${tonUsdStr})` : ''}\n`;
 
-const positiveJettons = (info.jettons || []).filter(
-    j => Number(j.balance) > 0
-);
+    const positiveJettons = (info.jettons || []).filter(j => Number(j.balance) > 0);
+    const shownJettons = showAll ? positiveJettons : positiveJettons.slice(0, WALLET_JETTONS_PREVIEW_COUNT);
 
-if (positiveJettons.length > 0) {
-    text += `\n📦 **Assets**\n\n`;
+    if (positiveJettons.length > 0) {
+        text += `\n${T(userId, 'wallet_assets_title')}\n`;
+        for (const j of shownJettons) {
+            const decimals = j.jetton?.decimals ?? 9;
+            const bal = Number(j.balance) / Math.pow(10, decimals);
+            const symbol = j.jetton?.symbol || '?';
+            const balStr = hidden ? MASK : bal.toLocaleString('en-US', { maximumFractionDigits: 4 });
 
-    for (const j of positiveJettons.slice(0, 15)) {
-        const decimals = j.jetton?.decimals ?? 9;
-        const bal = Number(j.balance) / Math.pow(10, decimals);
-        const symbol = j.jetton?.symbol || '?';
+            const usdPrice = getJettonUsdPrice(j);
+            const usdStr = (!hidden && usdPrice) ? ` (~$${(bal * usdPrice).toFixed(2)})` : '';
 
-        text += `🔹 **${symbol}**  \`${bal.toLocaleString('en-US', {
-            maximumFractionDigits: 4
-        })}\`\n`;
+            text += `🔸 ${symbol}: \`${balStr}\`${usdStr}\n`;
+        }
+        if (!showAll && positiveJettons.length > WALLET_JETTONS_PREVIEW_COUNT) {
+            text += `\n_… yana ${positiveJettons.length - WALLET_JETTONS_PREVIEW_COUNT} ta asest bor_\n`;
+        }
+    } else {
+        text += `\n${T(userId, 'wallet_no_assets')}\n`;
     }
 
-    if (positiveJettons.length > 15) {
-        text += `\n_… va yana ${positiveJettons.length - 15} ta asset_\n`;
-    }
-} else {
-    text += `\n📦 **Assets**\n`;
-    text += `└ ${T(userId, 'wallet_no_assets')}\n`;
+    text += `\n🔗 [TonViewer](https://tonviewer.com/${address})`;
+    return text;
 }
 
-text += `\n🔗 [View on TonViewer](https://tonviewer.com/${address})`;
+// /mywallet uchun matn + tugmalarni birgalikda tayyorlaydi (hidden/showAll holatiga qarab)
+async function buildWalletView(userId, address, hidden, showAll) {
+    const info = await getWalletInfo(address);
+    const text = await formatWalletInfo(userId, address, info, hidden, showAll);
 
-return text;
+    const positiveJettons = (info.jettons || []).filter(j => Number(j.balance) > 0);
+    const buttons = [];
+
+    const balBtnLabel = hidden ? T(userId, 'wallet_show_balance_btn') : T(userId, 'wallet_hide_balance_btn');
+    buttons.push([Markup.button.callback(balBtnLabel, `walletview_${userId}_${hidden ? 0 : 1}_${showAll ? 1 : 0}`)]);
+
+    if (!showAll && positiveJettons.length > WALLET_JETTONS_PREVIEW_COUNT) {
+        buttons.push([Markup.button.callback(T(userId, 'wallet_showall_btn'), `walletview_${userId}_${hidden ? 1 : 0}_1`)]);
+    }
+
+    buttons.push([Markup.button.callback(T(userId, 'wallet_change_btn'), `changewallet_${userId}`)]);
+    buttons.push([Markup.button.callback(T(userId, 'delete_btn'), `del_${userId}_wallet`)]);
+
+    return { text, buttons };
 }
 
 async function updateAllRates() {
@@ -536,16 +638,101 @@ function expandK(text) {
 }
 
 // --- MATN TARJIMASI (Google'ning bepul, kalitsiz endpointi orqali) ---
-async function translateText(text, targetLang) {
+// Eslatma: bu norasmiy Google endpointi ba'zan hosting/server IP-manzillarini
+// (Render, Heroku va h.k.) bloklab qo'yishi mumkin (odatda brauzerdan ishlaydi,
+// lekin serverdan 403 yoki bo'sh javob qaytarishi mumkin). Shu sababli bu yerda
+// brauzerga o'xshash header qo'shilgan va ikkinchi domen zaxira sifatida sinaladi.
+// Yandex Cloud Translate API v2 orqali tarjima qilishga urinadi.
+// YANDEX_API_KEY/YANDEX_FOLDER_ID sozlanmagan bo'lsa, shunchaki null qaytaradi
+// (chaqiruvchi funksiya keyin Google'ga o'tadi).
+async function translateViaYandex(text, targetLang) {
+    if (!YANDEX_API_KEY || !YANDEX_FOLDER_ID) return null;
+
     try {
-        const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${encodeURIComponent(targetLang)}&dt=t&q=${encodeURIComponent(text)}`;
-        const { data } = await axios.get(url, { timeout: 10000 });
-        const translated = data[0].map(chunk => chunk[0]).join('');
-        const detectedLang = data[2] || null;
-        return { translated, detectedLang };
+        const { data } = await axios.post(
+            'https://translate.api.cloud.yandex.net/translate/v2/translate',
+            {
+                folderId: YANDEX_FOLDER_ID,
+                texts: [text],
+                targetLanguageCode: targetLang
+            },
+            {
+                timeout: 10000,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Api-Key ${YANDEX_API_KEY}`
+                }
+            }
+        );
+
+        const t = data?.translations?.[0];
+        if (t?.text) {
+            return { translated: t.text, detectedLang: t.detectedLanguageCode || null };
+        }
+        throw new Error(`Kutilmagan javob formati: ${JSON.stringify(data).slice(0, 200)}`);
     } catch (e) {
+        const status = e.response?.status ? `HTTP ${e.response.status}` : e.message;
+        const details = e.response?.data ? JSON.stringify(e.response.data).slice(0, 300) : '';
+        console.error('⚠️ Yandex Translate xatolik:', status, details);
         return null;
     }
+}
+
+async function translateText(text, targetLang) {
+    // 1) Yandex Cloud Translate — sozlangan bo'lsa, birinchi navbatda shu ishlatiladi
+    const yandexResult = await translateViaYandex(text, targetLang);
+    if (yandexResult) return yandexResult;
+
+    // 2) Zaxira: Google'ning bepul, kalitsiz endpointi
+    const endpoints = [
+        'https://translate.googleapis.com/translate_a/single',
+        'https://translate.google.com/translate_a/single'
+    ];
+
+    let lastStatus = null;
+
+    for (let i = 0; i < endpoints.length; i++) {
+        const base = endpoints[i];
+
+        // Agar oldingi urinish "juda ko'p so'rov" (429) bilan tugagan bo'lsa,
+        // keyingi domenga darhol yugurmasdan, biroz kutib turamiz — bu bir xil
+        // hisobga/IP'ga qarshi ketma-ket so'rovlarni kamaytiradi.
+        if (i > 0 && lastStatus === 429) {
+            await new Promise((r) => setTimeout(r, 700));
+        }
+
+        try {
+            const url = `${base}?client=gtx&sl=auto&tl=${encodeURIComponent(targetLang)}&dt=t&q=${encodeURIComponent(text)}`;
+            const { data } = await axios.get(url, {
+                timeout: 10000,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                    'Accept-Language': 'en-US,en;q=0.9'
+                }
+            });
+
+            if (Array.isArray(data) && Array.isArray(data[0])) {
+                const translated = data[0].map(chunk => chunk[0]).join('');
+                const detectedLang = data[2] || null;
+                if (translated) return { translated, detectedLang };
+            }
+            throw new Error(`Kutilmagan javob formati: ${JSON.stringify(data).slice(0, 200)}`);
+        } catch (e) {
+            lastStatus = e.response?.status || null;
+            const status = lastStatus ? `HTTP ${lastStatus}` : e.message;
+            console.error(`⚠️ Tarjima xatolik (${base}):`, status);
+        }
+    }
+
+    // Yandex ham, Google ham muvaffaqiyatsiz bo'ldi — Render loglarida
+    // yuqoridagi xatoliklarni tekshiring:
+    // - Yandex uchun "HTTP 401/403" — API-kalit yoki folderId noto'g'ri,
+    //   yoki xizmat hisobiga "ai.translate.user" roli berilmagan.
+    // - Google uchun "HTTP 403" doimiy chiqsa: Google shu serverning
+    //   IP-manzilini bloklagan (kod bilan tuzatib bo'lmaydi).
+    // - Google uchun "HTTP 429" — bloklash emas, "juda ko'p so'rov" degani,
+    //   vaqtincha bo'lishi mumkin.
+    return null;
 }
 
 // state.aliases dagi barcha taxalluslarni (masalan "somsa" -> "gram") va "usdt" ni matnda almashtiradi
@@ -599,18 +786,17 @@ async function getExtras(usdVal, exclude = "") {
     return lines.join("\n");
 }
 
-// Eski xabarlarni o'tkazib yuborish
+// Eski xabarlarni o'tkazib yuborish (bot qayta ishga tushganda navbatda qolib ketgan eski
+// matnli xabarlarni o'tkazib yuborish uchun). Tugma bosishlar (callback_query) uchun bu filtr
+// qo'llanilmaydi — chunki Telegram callback_query o'zining vaqt tamg'asini bermaydi va
+// ctx.callbackQuery.message.date aslida tugma joylashgan xabar YUBORILGAN payt, tugma
+// BOSILGAN payt emas. Shu sabab avval "O'chirish"/"Hamyonni o'zgartirish" kabi tugmalar
+// xabar yuborilgandan 10 soniya o'tgach umuman ishlamay qolgan edi.
 bot.use(async (ctx, next) => {
-    const now = Math.floor(Date.now() / 1000);
-
     if (ctx.message) {
+        const now = Math.floor(Date.now() / 1000);
         const msgDate = ctx.message.date;
         if (now - msgDate > 5) return;
-    }
-
-    if (ctx.callbackQuery && ctx.callbackQuery.message) {
-        const cbDate = ctx.callbackQuery.message.date;
-        if (now - cbDate > 10) return;
     }
 
     await next();
@@ -645,6 +831,152 @@ bot.command(['rates', 'kurslar'], async (ctx) => {
     ctx.replyWithMarkdown(msg);
 });
 
+// --- 6b. INLINE REJIMDA GRAFIKLI RASM (QuickChart — bepul, kalitsiz xizmat) ---
+// Faqat GRAM/TON uchun ishlaydi, chunki faqat shu token uchun narx tarixi
+// (state.priceHistory.GRAM) saqlanadi. QuickChart tashqi bepul xizmat bo'lgani
+// uchun u vaqtincha ishlamay qolsa, rasm ko'rinmasligi mumkin — bu holatda oddiy
+// matnli natija hamon ko'rsatiladi (pastdagi inline_query handleriga qarang).
+function buildGramChartUrl(currentPrice, changePct) {
+    const hist = [...(state.priceHistory.GRAM || [])].sort((a, b) => a.t - b.t);
+    if (hist.length < 2) return null;
+
+    const maxPoints = 60;
+    const step = Math.max(1, Math.floor(hist.length / maxPoints));
+    const sampled = hist.filter((_, i) => i % step === 0);
+
+    const labels = sampled.map(e => new Date(e.t).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
+    const data = sampled.map(e => e.p);
+
+    const up = changePct >= 0;
+    const lineColor = up ? '#16a34a' : '#dc2626';
+    const fillColor = up ? 'rgba(22,163,74,0.15)' : 'rgba(220,38,38,0.15)';
+
+    const config = {
+        type: 'line',
+        data: {
+            labels,
+            datasets: [{
+                label: 'GRAM/USD',
+                data,
+                borderColor: lineColor,
+                backgroundColor: fillColor,
+                fill: true,
+                pointRadius: 0,
+                borderWidth: 2,
+                tension: 0.3
+            }]
+        },
+        options: {
+            title: {
+                display: true,
+                text: `GRAM   $${currentPrice.toFixed(4)}   ${up ? '+' : ''}${changePct.toFixed(2)}%`
+            },
+            legend: { display: false },
+            scales: {
+                xAxes: [{ gridLines: { display: false } }],
+                yAxes: [{ gridLines: { color: '#eeeeee' } }]
+            }
+        }
+    };
+
+    return `https://quickchart.io/chart?width=600&height=320&backgroundColor=white&c=${encodeURIComponent(JSON.stringify(config))}`;
+}
+
+// --- 6c. INLINE REJIMDA SVOP-KARTOCHKA (masalan "1 ton uzs" kabi 2 tokenli konvertatsiya uchun) ---
+// Emoji shriftiga bog'liq bo'lib qolmasin uchun (ba'zi serverlarda rangli emoji
+// shrifti o'rnatilmagan bo'lishi mumkin), ikonkalar oddiy rangli doira + bitta
+// harf/belgi ko'rinishida chiziladi.
+const TOKEN_ICON_STYLE = {
+    GRAM: { char: 'T', color: '#2AABEE' },
+    TON: { char: 'T', color: '#2AABEE' },
+    USD: { char: '$', color: '#8E8E93' },
+    USDT: { char: '$', color: '#26A17B' },
+    UZS: { char: 'U', color: '#16A34A' },
+    RUB: { char: '₽', color: '#DC2626' },
+    STARS: { char: '★', color: '#F59E0B' }
+};
+
+function getTokenIconStyle(sym) {
+    return TOKEN_ICON_STYLE[sym] || { char: (sym || '?').charAt(0).toUpperCase(), color: '#6366F1' };
+}
+
+function drawRoundedRect(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+}
+
+function drawSwapCardRow(ctx, x, y, w, h, sym, amountStr) {
+    const icon = getTokenIconStyle(sym);
+    const iconR = 22;
+    const iconCx = x + 40;
+    const iconCy = y + h / 2;
+
+    ctx.beginPath();
+    ctx.arc(iconCx, iconCy, iconR, 0, Math.PI * 2);
+    ctx.fillStyle = icon.color;
+    ctx.fill();
+
+    ctx.fillStyle = '#FFFFFF';
+    ctx.font = 'bold 20px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(icon.char, iconCx, iconCy + 1);
+
+    ctx.fillStyle = '#111111';
+    ctx.font = 'bold 24px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText(sym, iconCx + iconR + 16, iconCy);
+
+    ctx.font = 'bold 30px sans-serif';
+    ctx.textAlign = 'right';
+    ctx.fillText(amountStr, x + w - 24, iconCy);
+}
+
+// PNG buferini qaytaradi — /inline-card.png endpointi shuni to'g'ridan-to'g'ri javob sifatida yuboradi
+function buildSwapCardBuffer(fSym, fAmountStr, tSym, tAmountStr) {
+    const width = 500, height = 300;
+    const canvas = createCanvas(width, height);
+    const ctx = canvas.getContext('2d');
+
+    ctx.fillStyle = '#17212B';
+    ctx.fillRect(0, 0, width, height);
+
+    const pad = 24;
+    const cardX = pad, cardY = pad, cardW = width - pad * 2, cardH = height - pad * 2;
+    drawRoundedRect(ctx, cardX, cardY, cardW, cardH, 20);
+    ctx.fillStyle = '#FFFFFF';
+    ctx.fill();
+
+    const rowH = cardH / 2;
+    drawSwapCardRow(ctx, cardX, cardY, cardW, rowH, fSym, fAmountStr);
+    drawSwapCardRow(ctx, cardX, cardY + rowH, cardW, rowH, tSym, tAmountStr);
+
+    const midY = cardY + rowH;
+    ctx.strokeStyle = '#EEEEEE';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(cardX + 24, midY);
+    ctx.lineTo(cardX + cardW - 24, midY);
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.arc(cardX + cardW / 2, midY, 14, 0, Math.PI * 2);
+    ctx.fillStyle = '#E9F3FF';
+    ctx.fill();
+    ctx.fillStyle = '#2AABEE';
+    ctx.font = 'bold 16px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('\u21C5', cardX + cardW / 2, midY + 1); // ⇅
+
+    return canvas.toBuffer('image/png');
+}
+
 // --- 6. INLINE MODE (FAQAT SO'RALGAN KURS) ---
 bot.on('inline_query', async (ctx) => {
     let query = ctx.inlineQuery.query.trim().toLowerCase();
@@ -652,6 +984,47 @@ bot.on('inline_query', async (ctx) => {
 
     query = expandK(query);
     query = normalizeSymbols(query);
+
+    // Faqat token nomi yozilsa (masalan "gram"), narx + (GRAM uchun) grafikli
+    // rasm kartochkasini qaytaramiz — @send bot uslubidagi natija.
+    const bareSymbolMatch = query.match(/^([a-z][a-z0-9]*)$/);
+    if (bareSymbolMatch) {
+        const sym = resolveSymbol(bareSymbolMatch[1]);
+        const priceData = await getPrice(sym === 'GRAM' ? 'TON' : sym);
+        if (!priceData) return;
+
+        const changeStr = `${priceData.change >= 0 ? '📈 +' : '📉 '}${priceData.change.toFixed(2)}%`;
+        const results = [];
+
+        if (sym === 'GRAM') {
+            const chartUrl = buildGramChartUrl(priceData.price, priceData.change);
+            if (chartUrl) {
+                results.push({
+                    type: 'photo',
+                    id: `chart_${sym}_${Date.now()}`,
+                    photo_url: chartUrl,
+                    thumb_url: chartUrl,
+                    photo_width: 600,
+                    photo_height: 320,
+                    caption: `💎 GRAM/TON = \`$${fmt(priceData.price, 'USD')}\`  (${changeStr})`,
+                    parse_mode: 'Markdown'
+                });
+            }
+        }
+
+        results.push({
+            type: 'article',
+            id: `price_${sym}_${Date.now()}`,
+            title: `${sym} = $${fmt(priceData.price, 'USD')}`,
+            description: `24s: ${changeStr}`,
+            input_message_content: {
+                message_text: `💱 **${sym}** = \`$${fmt(priceData.price, 'USD')}\`  (${changeStr})`,
+                parse_mode: 'Markdown'
+            }
+        });
+
+        return ctx.answerInlineQuery(results, { cache_time: 60, is_personal: false });
+    }
 
     const match = query.match(/^([\d\s\+\-\*\/\(\)\.]+)\s+([a-z][a-z0-9]*)(?:\s+(?:to\s+)?([a-z][a-z0-9]*))?$/);
     if (!match) return;
@@ -674,16 +1047,30 @@ bot.on('inline_query', async (ctx) => {
 
             const messageText = `💱 ${amt} ${fSym} = ${fmt(res, tSym)} ${tSym}`;
 
-            return ctx.answerInlineQuery([{
-                type: 'article',
-                id: `convert_${ts}`,
-                title: `${fmt(amt, fSym)} ${fSym} = ${fmt(res, tSym)} ${tSym}`,
-                description: `Kurs: 1 ${fSym} = ${fmt(fVal / tVal, tSym)} ${tSym}`,
-                input_message_content: {
-                    message_text: messageText,
+            const cardUrl = `${PUBLIC_BASE_URL}/inline-card.png?f=${encodeURIComponent(fSym)}&fa=${encodeURIComponent(fmt(amt, fSym))}&t=${encodeURIComponent(tSym)}&ta=${encodeURIComponent(fmt(res, tSym))}`;
+
+            return ctx.answerInlineQuery([
+                {
+                    type: 'photo',
+                    id: `convertcard_${ts}`,
+                    photo_url: cardUrl,
+                    thumb_url: cardUrl,
+                    photo_width: 500,
+                    photo_height: 300,
+                    caption: messageText,
                     parse_mode: 'Markdown'
                 },
-            }], {
+                {
+                    type: 'article',
+                    id: `convert_${ts}`,
+                    title: `${fmt(amt, fSym)} ${fSym} = ${fmt(res, tSym)} ${tSym}`,
+                    description: `Kurs: 1 ${fSym} = ${fmt(fVal / tVal, tSym)} ${tSym}`,
+                    input_message_content: {
+                        message_text: messageText,
+                        parse_mode: 'Markdown'
+                    },
+                }
+            ], {
                 cache_time: 0,
                 is_personal: true
             });
@@ -809,21 +1196,64 @@ bot.action(/setlang_(uz|ru|en)/, (ctx) => {
 // --- /MYWALLET — TON HAMYONNI QO'SHISH / KO'RISH ---
 bot.command(['mywallet', 'hamyonim'], async (ctx) => {
     const userId = ctx.from.id;
+
+    // "/mywallet m" — kimningdir xabariga reply qilib yuborilsa, o'sha odamning
+    // hamyon manzilini nusxa olish qulay bo'lgan (monospace) shaklda ko'rsatadi.
+    // Reply qilinmagan bo'lsa (yoki botning o'z xabariga reply qilingan bo'lsa),
+    // buyruqni yozgan odamning (ya'ni o'zining) hamyoni xuddi shu monospace
+    // shaklda ko'rsatiladi — savdo paytida o'z manzilini tez nusxalash uchun.
+    const parts = ctx.message.text.trim().split(/\s+/);
+    if (parts[1] && parts[1].toLowerCase() === 'm') {
+        const targetMsg = ctx.message.reply_to_message;
+
+        let targetUser;
+        if (targetMsg && targetMsg.from) {
+            // Agar reply qilingan xabar botning o'zinikidan bo'lsa (masalan avvalgi
+            // ogohlantirish xabariga tasodifan reply qilingan bo'lsa), botning emas,
+            // shu buyruqni yozgan odamning (ya'ni o'zining) hamyonini ko'rsatamiz.
+            targetUser = targetMsg.from.is_bot ? ctx.from : targetMsg.from;
+        } else {
+            // Reply umuman yo'q — demak o'zining hamyonini so'ramoqda.
+            targetUser = ctx.from;
+        }
+
+        const targetId = targetUser.id;
+        const targetWallet = state.wallets[targetId];
+        if (!targetWallet) {
+            return ctx.reply(T(userId, 'wallet_lookup_not_found'));
+        }
+
+        const targetName = targetUser.username ? `@${targetUser.username}` : (targetUser.first_name || `User_${targetId}`);
+
+        await ctx.replyWithMarkdown(T(userId, 'wallet_lookup_result', targetName, targetWallet), {
+            reply_to_message_id: targetMsg ? targetMsg.message_id : ctx.message.message_id
+        });
+
+        // Guruhni savdo paytida toza saqlash uchun "/mywallet m" buyrug'ining o'zini o'chiramiz.
+        // ESLATMA: buni bot faqat guruhda admin bo'lib, "xabarlarni o'chirish" huquqiga ega
+        // bo'lsagina bajara oladi — shaxsiy chatda yoki huquq bo'lmasa, Telegram bunga umuman
+        // ruxsat bermaydi (bu kodning emas, Telegram platformasining o'z cheklovi).
+        // ctx.deleteMessage().catch(() => { });
+        return;
+    }
+
     const wallet = state.wallets[userId];
 
     if (!wallet) {
         state.pendingWallet[userId] = true;
         savePersistedState();
-        return ctx.replyWithMarkdown(T(userId, 'wallet_ask'));
+        return ctx.replyWithMarkdown(T(userId, 'wallet_ask'), Markup.inlineKeyboard([
+            [Markup.button.callback(T(userId, 'delete_btn'), `del_${userId}_askwallet`)]
+        ]));
     }
 
     const loadingMsg = await ctx.replyWithMarkdown(T(userId, 'wallet_loading'));
     try {
-        const info = await getWalletInfo(wallet);
-        const text = await formatWalletInfo(userId, wallet, info);
+        const { text, buttons } = await buildWalletView(userId, wallet, false, false);
         await ctx.telegram.editMessageText(ctx.chat.id, loadingMsg.message_id, undefined, text, {
             parse_mode: 'Markdown',
-            disable_web_page_preview: true
+            disable_web_page_preview: true,
+            ...Markup.inlineKeyboard(buttons)
         });
     } catch (e) {
         console.error('Hamyon ma\'lumotini olishda xatolik:', e.message);
@@ -833,9 +1263,53 @@ bot.command(['mywallet', 'hamyonim'], async (ctx) => {
     }
 });
 
+// Balansni yashirish/ko'rsatish va "barchasini ko'rish" tugmalari
+bot.action(/walletview_(\d+)_(\d)_(\d)/, async (ctx) => {
+    const userId = ctx.from.id;
+    if (ctx.match[1] !== userId.toString()) {
+        return ctx.answerCbQuery();
+    }
+
+    const wallet = state.wallets[userId];
+    if (!wallet) {
+        return ctx.answerCbQuery();
+    }
+
+    const hidden = ctx.match[2] === '1';
+    const showAll = ctx.match[3] === '1';
+
+    await ctx.answerCbQuery();
+    try {
+        const { text, buttons } = await buildWalletView(userId, wallet, hidden, showAll);
+        await ctx.editMessageText(text, {
+            parse_mode: 'Markdown',
+            disable_web_page_preview: true,
+            ...Markup.inlineKeyboard(buttons)
+        });
+    } catch (e) {
+        console.error('Hamyon ko\'rinishini yangilashda xatolik:', e.message);
+    }
+});
+
+// Hamyonni o'zgartirish tugmasi bosilganda — qayta manzil so'raladi
+bot.action(/changewallet_(\d+)/, async (ctx) => {
+    const userId = ctx.from.id;
+    if (ctx.match[1] !== userId.toString()) {
+        return ctx.answerCbQuery();
+    }
+    state.pendingWallet[userId] = true;
+    savePersistedState();
+    await ctx.answerCbQuery();
+    await ctx.replyWithMarkdown(T(userId, 'wallet_ask'), Markup.inlineKeyboard([
+        [Markup.button.callback(T(userId, 'delete_btn'), `del_${userId}_askwallet`)]
+    ]));
+});
+
 // Foydalanuvchi /mywallet bosgan bot xabariga hamyon manzilini reply qilib yuborsa, shu yerda ushlanadi
 bot.on('text', async (ctx, next) => {
-    const userId = ctx.from.id;
+    const userId = ctx.from?.id;
+    if (!userId) return next(); // kanal postlari kabi from'siz xabarlarda xatolik bermasin
+
     const isReplyToBot = ctx.message.reply_to_message?.from?.id === ctx.botInfo?.id;
 
     if (state.pendingWallet[userId] && isReplyToBot) {
@@ -972,6 +1446,18 @@ bot.command('tr', async (ctx) => {
     const userId = ctx.from.id;
     const parts = ctx.message.text.split(' ');
 
+    // /tr st uz — kanal postlari avtomatik tarjima qilinadigan standart tilni belgilaydi (faqat admin)
+    if (parts[1] && parts[1].toLowerCase() === 'st') {
+        if (!isAdmin(ctx)) return ctx.reply(T(userId, 'not_admin'));
+
+        const newLang = (parts[2] || '').toLowerCase().trim();
+        if (!newLang) return ctx.replyWithMarkdown(T(userId, 'tr_set_usage'));
+
+        state.autoTranslateLang = newLang;
+        savePersistedState();
+        return ctx.replyWithMarkdown(T(userId, 'tr_set_saved', newLang));
+    }
+
     if (parts.length < 2) {
         return ctx.replyWithMarkdown(T(userId, 'tr_usage'));
     }
@@ -1013,20 +1499,22 @@ bot.on('message', async (ctx, next) => {
     const textToTranslate = msg.text || msg.caption; // Matn yoki rasm ostidagi fel/caption
     if (!textToTranslate) return;
 
-    // Tilni aniqlash va o'zbekcha bo'lmasa tarjima qilish
-    // Eslatma: translateText funktsiyangiz `sourceLang` yoki avto-tarjimani qo'llashi kerak
-    const result = await translateText(textToTranslate, 'uz');
+    // Standart tarjima tili (/tr st <til> orqali admin tomonidan o'zgartiriladi)
+    const targetLang = state.autoTranslateLang || 'uz';
 
-    // Agar matn allaqachon o'zbekcha bo'lsa yoki tarjima amalga oshmagan bo'lsa to'xtaymiz
-    if (!result || result.detectedLang === 'uz' || result.translated === textToTranslate) {
+    const result = await translateText(textToTranslate, targetLang);
+
+    // Agar matn allaqachon shu tilda bo'lsa yoki tarjima amalga oshmagan bo'lsa to'xtaymiz
+    if (!result || result.detectedLang === targetLang || result.translated === textToTranslate) {
         return;
     }
 
-    // Tarjima qilingan matnni post ostiga reply qilib yuborish
+    // Tarjima qilingan matnni post ostiga reply qilib yuborish (sarlavhasiz, plain matn sifatida —
+    // tarjima qilingan matn ichida * _ ` [ kabi belgilar bo'lishi mumkin va Markdown parse xatoligiga
+    // olib kelib, xabar yuborilmay qolishiga sabab bo'lishi mumkin edi)
     try {
-        await ctx.reply(`🇺🇿 **O'zbekcha tarjimasi:**\n\n${result.translated}`, {
-            reply_to_message_id: msg.message_id,
-            parse_mode: 'Markdown'
+        await ctx.reply(result.translated, {
+            reply_to_message_id: msg.message_id
         });
     } catch (err) {
         console.error('Avto-tarjima yuborishda xatolik:', err);
@@ -1075,6 +1563,75 @@ async function handleConversion(ctx) {
                 ...Markup.inlineKeyboard([[Markup.button.callback(T(ctx.from.id, 'delete_btn'), `del_${ctx.from.id}_${ctx.message.message_id}`)]])
             });
         }
+    }
+
+    // Foiz — BARCHA amallar bilan (+, -, *, /), bazasi istalgan matematik ifoda
+    // bo'lishi mumkin (qavslar, bir nechta amal bilan ham), ixtiyoriy ravishda
+    // natijani boshqa valyuta/kriptoga konvertatsiya qilish bilan birga.
+    // Masalan: `148 + 2%`, `1k+23%`, `1k*1%`, `1000/50%`, `(100+50)*10%`,
+    // `1k +5% gram uzs` (avval 5% qo'shiladi, keyin GRAM'dan UZS'ga o'tkaziladi)
+    const m_percGen = text.match(/^([\d\s\+\-\*\/\(\)\.]+?)\s*([+\-\*\/])\s*(\d+(?:\.\d+)?)\s*%(?:\s+([a-z][a-z0-9]*))?(?:\s+(?:to\s+)?([a-z][a-z0-9]*))?$/);
+    if (m_percGen) {
+        try {
+            const baseExpr = m_percGen[1].trim();
+            const op = m_percGen[2];
+            const prc = parseFloat(m_percGen[3]);
+            const base = math.evaluate(baseExpr);
+
+            let result, calcLine;
+            if (op === '+') {
+                const multiplier = 1 + prc / 100;
+                result = base * multiplier;
+                calcLine = `\`${fmt(base)}*${fmt(multiplier)}\``;
+            } else if (op === '-') {
+                const multiplier = 1 - prc / 100;
+                result = base * multiplier;
+                calcLine = `\`${fmt(base)}*${fmt(multiplier)}\``;
+            } else if (op === '*') {
+                const multiplier = prc / 100;
+                result = base * multiplier;
+                calcLine = `\`${fmt(base)}*${fmt(multiplier)}\``;
+            } else { // '/'
+                const divisor = prc / 100;
+                result = base / divisor;
+                calcLine = `\`${fmt(base)}/${fmt(divisor)}\``;
+            }
+
+            if (!isFinite(result)) throw new Error('cheksiz natija');
+
+            const fSymRaw = m_percGen[4];
+            const tSymRaw = m_percGen[5];
+
+            if (fSymRaw) {
+                // Foizdan keyin valyuta/kripto konvertatsiyasi ham so'ralgan
+                let fSym = resolveSymbol(fSymRaw);
+                let tSym = resolveSymbol(tSymRaw || getUser(ctx.from.id).currency || "USD");
+
+                const fVal = await getVal(fSym);
+                const tVal = await getVal(tSym);
+
+                if (fVal && tVal) {
+                    const usd = math.multiply(result, fVal);
+                    const conv = math.divide(usd, tVal);
+
+                    const header = `🔢 ${calcLine} **= ${fmt(result, fSym)} ${fSym}**`;
+                    const resText = `${header}\n🪙 \`${fmt(conv, tSym)} ${tSym}\`\n\n${await getExtras(usd, tSym)}`;
+
+                    return ctx.replyWithMarkdown(resText, {
+                        reply_to_message_id: ctx.message.message_id,
+                        ...Markup.inlineKeyboard([[Markup.button.callback(T(ctx.from.id, 'delete_btn'), `del_${ctx.from.id}_${ctx.message.message_id}`)]])
+                    });
+                }
+            } else {
+                // Valyutasiz — faqat hisoblash natijasi
+                const resText = `${calcLine} = \`${fmt(result)}\``;
+
+                return ctx.replyWithMarkdown(resText, {
+                    reply_to_message_id: ctx.message.message_id,
+                    ...Markup.inlineKeyboard([[Markup.button.callback(T(ctx.from.id, 'delete_btn'), `del_${ctx.from.id}_${ctx.message.message_id}`)]])
+                });
+            }
+        } catch (e) { }
     }
 
     // Foiz hisob-kitobi
@@ -1147,11 +1704,32 @@ bot.on('text', (ctx) => handleConversion(ctx));
 
 // --- 9. TO'LIQ VA XAVFSIZ O'CHIRISH (DELETE) ---
 bot.action(/del_(\d+)/, (ctx) => {
+    ctx.answerCbQuery().catch(() => { });
     if (ctx.from.id.toString() === ctx.match[1]) ctx.deleteMessage().catch(() => { });
 });
 // --- 10. SERVER ISHGA TUSHISHI ---
 const server = express();
 server.get('/', (req, res) => res.send('Not Snap is Live!'));
+
+// Inline rejimdagi svop-kartochka rasmi shu yerdan generatsiya qilinadi.
+// Masalan: /inline-card.png?f=TON&fa=1&t=UZS&ta=13205
+server.get('/inline-card.png', (req, res) => {
+    try {
+        const fSym = String(req.query.f || '?').toUpperCase().slice(0, 10);
+        const fAmount = String(req.query.fa || '');
+        const tSym = String(req.query.t || '?').toUpperCase().slice(0, 10);
+        const tAmount = String(req.query.ta || '');
+
+        const buffer = buildSwapCardBuffer(fSym, fAmount, tSym, tAmount);
+        res.set('Content-Type', 'image/png');
+        res.set('Cache-Control', 'public, max-age=300');
+        res.send(buffer);
+    } catch (e) {
+        console.error('⚠️ Inline kartochka generatsiyasida xatolik:', e.message);
+        res.status(500).send('error');
+    }
+});
+
 server.listen(PORT, () => console.log(`Server portda faol: ${PORT}`));
 
 bot.launch();
