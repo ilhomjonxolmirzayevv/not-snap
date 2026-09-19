@@ -478,14 +478,14 @@ const MASK = '••••••';
 // showAll — true bo'lsa, barcha jettonlarni ko'rsatadi; aks holda faqat dastlabki 3 tasini
 async function formatWalletInfo(userId, address, info, hidden = false, showAll = false) {
     const lang = getUser(userId).lang;
-    const introList = WALLET_INTROS[lang] || WALLET_INTROS.uz;
-    const intro = introList[Math.floor(Math.random() * introList.length)];
+    // const introList = WALLET_INTROS[lang] || WALLET_INTROS.uz;
+    // const intro = introList[Math.floor(Math.random() * introList.length)];
 
     const tonBalance = Number(info.balanceNano) / 1e9;
     const tonPriceData = await getPrice('TON');
     const tonUsd = tonPriceData ? tonBalance * tonPriceData.price : null;
 
-    let text = `${intro}\n\n`;
+    let text = `\n\n`;
     text += `\`${address}\`\n\n`;
 
     const tonBalStr = hidden ? MASK : tonBalance.toFixed(4);
